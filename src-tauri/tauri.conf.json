@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI Image Generator",
+  "version": "0.1.0",
+  "identifier": "com.lukezy.image-gen",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1422",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AI Image Generator",
+        "width": 900,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "devtools": true,
+        "backgroundColor": "#1a1a1a",
+        "decorations": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {}
+}

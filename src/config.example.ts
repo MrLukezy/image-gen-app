@@ -1,0 +1,1 @@
+export const DEFAULT_API_KEY = 'sk-your-api-key-here';
