@@ -25,11 +25,23 @@ interface ChatEntry {
   loading?: boolean;
   timestamp: number;
   size?: string;
+  duration?: number;
+  completedAt?: number;
+  imageCount?: number;
 }
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.floor(s % 60);
+  return `${m}m ${rem}s`;
 }
 
 export default function App() {
@@ -45,6 +57,7 @@ export default function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatAreaRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [pastedImages, setPastedImages] = useState<string[]>([]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -70,18 +83,25 @@ export default function App() {
       type: 'assistant',
       loading: true,
       timestamp: Date.now(),
+      size,
     };
 
     setPrompt('');
+    setPastedImages([]);
     setEntries(prev => [...prev, userEntry, loadingEntry]);
     setIsLoading(true);
 
-    const refImages = showRefInput
+    const urlRefs = showRefInput
       ? refUrls
           .split('\n')
           .map(u => u.trim())
           .filter(u => u.length > 0)
-      : undefined;
+      : [];
+
+    const allRefs = [...urlRefs, ...pastedImages];
+    const refImages = allRefs.length > 0 ? allRefs : undefined;
+
+    const startTime = Date.now();
 
     try {
       const result = await invoke<{ images: string[]; error: string | null }>(
@@ -91,10 +111,12 @@ export default function App() {
           apiKey,
           size,
           n: numImages,
-          referenceImages: refImages && refImages.length > 0 ? refImages : undefined,
+          referenceImages: refImages,
           responseFormat: 'b64_json',
         }
       );
+
+      const endTime = Date.now();
 
       setEntries(prev =>
         prev.map(e =>
@@ -104,15 +126,26 @@ export default function App() {
                 loading: false,
                 images: result.images,
                 error: result.error || undefined,
+                duration: endTime - startTime,
+                completedAt: endTime,
+                imageCount: result.images?.length || 0,
+                size,
               }
             : e
         )
       );
     } catch (err) {
+      const endTime = Date.now();
       setEntries(prev =>
         prev.map(e =>
           e.id === assistantId
-            ? { ...e, loading: false, error: String(err) }
+            ? {
+                ...e,
+                loading: false,
+                error: String(err),
+                duration: endTime - startTime,
+                completedAt: endTime,
+              }
             : e
         )
       );
@@ -127,6 +160,27 @@ export default function App() {
       e.preventDefault();
       handleSend();
     }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        e.preventDefault();
+        const blob = items[i].getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const dataUrl = ev.target?.result as string;
+          setPastedImages(prev => prev.length < 6 ? [...prev, dataUrl] : prev);
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  };
+
+  const removePastedImage = (index: number) => {
+    setPastedImages(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleWindowClose = () => invoke('window_close');
@@ -279,6 +333,38 @@ export default function App() {
                       ))}
                     </div>
                   )}
+                  {entry.completedAt && (
+                    <div className="gen-summary">
+                      <span className="summary-item">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                        </svg>
+                        {entry.duration != null && formatDuration(entry.duration)}
+                      </span>
+                      {entry.size && (
+                        <span className="summary-item">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" />
+                          </svg>
+                          {entry.size}
+                        </span>
+                      )}
+                      {entry.imageCount != null && entry.imageCount > 0 && (
+                        <span className="summary-item">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                          </svg>
+                          {entry.imageCount} 张
+                        </span>
+                      )}
+                      <span className="summary-item">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" />
+                        </svg>
+                        {formatTime(entry.completedAt)}
+                      </span>
+                    </div>
+                  )}
                   <div className="msg-meta">
                     <span className="meta-time">{formatTime(entry.timestamp)}</span>
                   </div>
@@ -342,6 +428,19 @@ export default function App() {
           </div>
         </div>
 
+        {pastedImages.length > 0 && (
+          <div className="pasted-images-bar">
+            {pastedImages.map((img, i) => (
+              <div key={i} className="pasted-thumb">
+                <img src={img} alt={`参考图 ${i + 1}`} />
+                <button className="pasted-remove" onClick={() => removePastedImage(i)} title="移除">
+                  <svg width="10" height="10" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="input-row">
           <textarea
             ref={inputRef}
@@ -349,7 +448,8 @@ export default function App() {
             value={prompt}
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="描述你想生成的图片... (Shift+Enter 换行)"
+            onPaste={handlePaste}
+            placeholder="描述你想生成的图片... (粘贴图片作为参考图，Shift+Enter 换行)"
             rows={1}
             disabled={isLoading}
           />

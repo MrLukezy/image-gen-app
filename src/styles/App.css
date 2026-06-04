@@ -503,6 +503,77 @@
   opacity: 0.6;
 }
 
+.pasted-images-bar {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+
+.pasted-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.pasted-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.pasted-thumb:hover {
+  border-color: var(--accent);
+}
+
+.pasted-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  background: rgba(0, 0, 0, 0.7);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.pasted-thumb:hover .pasted-remove {
+  opacity: 1;
+}
+
+.gen-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  padding: 4px 0 0;
+}
+
+.summary-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.summary-item svg {
+  flex-shrink: 0;
+}
+
 .send-btn {
   width: 42px;
   height: 42px;
