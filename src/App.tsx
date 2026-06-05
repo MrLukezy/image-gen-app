@@ -107,41 +107,44 @@ export default function App() {
       const all = await invoke<Conversation[]>('list_conversations');
       setConversations(all);
 
-      const urlConvId = getConvIdFromUrl();
-      if (urlConvId) {
-        const conv = all.find(c => c.id === urlConvId);
-        if (conv) {
-          setActiveConvId(conv.id);
-          setEntries(conv.entries.filter(e => !e.loading));
-          return;
+      // Only set activeConvId + entries on initial load or if current active doesn't exist anymore
+      if (!activeConvId || !all.find(c => c.id === activeConvId)) {
+        const urlConvId = getConvIdFromUrl();
+        if (urlConvId) {
+          const conv = all.find(c => c.id === urlConvId);
+          if (conv) {
+            setActiveConvId(conv.id);
+            setEntries(conv.entries.filter(e => !e.loading));
+            return;
+          }
         }
-      }
 
-      const savedId = getCurrConvId();
-      if (savedId) {
-        const conv = all.find(c => c.id === savedId);
-        if (conv) {
-          setActiveConvId(conv.id);
-          setEntries(conv.entries.filter(e => !e.loading));
-          return;
+        const savedId = getCurrConvId();
+        if (savedId) {
+          const conv = all.find(c => c.id === savedId);
+          if (conv) {
+            setActiveConvId(conv.id);
+            setEntries(conv.entries.filter(e => !e.loading));
+            return;
+          }
         }
-      }
 
-      if (all.length > 0) {
-        const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
-        setActiveConvId(latest.id);
-        setEntries(latest.entries.filter(e => !e.loading));
-      } else {
-        const newId = genId();
-        await invoke('create_conversation', { title: 'New Chat' });
-        setActiveConvId(newId);
-        setEntries([]);
-        await invoke('save_conversation', {
-          conversationId: newId,
-          title: 'New Chat',
-          entries: [],
-        });
-        loadConversations();
+        if (all.length > 0) {
+          const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+          setActiveConvId(latest.id);
+          setEntries(latest.entries.filter(e => !e.loading));
+        } else {
+          const newId = genId();
+          await invoke('create_conversation', { title: 'New Chat' });
+          setActiveConvId(newId);
+          setEntries([]);
+          await invoke('save_conversation', {
+            conversationId: newId,
+            title: 'New Chat',
+            entries: [],
+          });
+          loadConversations();
+        }
       }
     } catch (err) {
       console.error('Failed to load conversations:', err);
@@ -174,7 +177,7 @@ export default function App() {
     const conv = conversations.find(c => c.id === id);
     if (conv) {
       setActiveConvId(id);
-      setEntries(conv.entries.filter(e => !e.loading));
+      setEntries(conv.entries);
     }
   };
 
@@ -260,6 +263,15 @@ export default function App() {
     const beforeEntries = [...snapshotEntries, userEntry, loadingEntry];
     setEntries(beforeEntries);
     setLoadingConvs(prev => { const n = new Set(prev); n.add(convId); return n; });
+
+    // Save in-progress state immediately so switching back shows the user prompt + spinner
+    const inProgressTitle = beforeEntries.find((e: ConvEntry) => e.type === 'user' && e.prompt)?.prompt?.slice(0, 30) || 'New Chat';
+    await invoke('save_conversation', {
+      conversationId: convId,
+      title: inProgressTitle,
+      entries: beforeEntries,
+    });
+    setTimeout(() => loadConversations(), 50);
 
     const startTime = Date.now();
     const finalize = async (images: string[], error: string | null) => {
