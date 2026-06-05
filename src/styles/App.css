@@ -595,6 +595,48 @@
   gap: 10px;
 }
 
+.validation-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(229, 83, 75, 0.1);
+  border: 1px solid rgba(229, 83, 75, 0.3);
+  border-radius: 8px;
+  color: var(--error);
+  font-size: 13px;
+  animation: shake 0.3s ease;
+}
+
+.validation-error span {
+  flex: 1;
+}
+
+.validation-close {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--error);
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.validation-close:hover {
+  background: rgba(229, 83, 75, 0.2);
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
 .input-controls {
   display: flex;
   align-items: center;

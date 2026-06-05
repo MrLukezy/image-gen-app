@@ -12,6 +12,7 @@ export interface ConvEntry {
   imageCount?: number;
   model?: string;
   contextCount?: number;
+  contextImageCount?: number;
 }
 
 export interface Conversation {

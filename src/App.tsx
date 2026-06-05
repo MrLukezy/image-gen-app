@@ -35,13 +35,26 @@ function formatDuration(ms: number): string {
   return `${m}m ${rem}s`;
 }
 
-function buildContext(entries: ConvEntry[]): { text: string; count: number } {
-  const prompts = entries
+function buildContext(entries: ConvEntry[], hasUserRefs: boolean) {
+  const userPrompts = entries
     .filter(e => e.type === 'user' && e.prompt)
     .map(e => e.prompt!);
-  if (prompts.length <= 1) return { text: '', count: 0 };
-  const recent = prompts.slice(-3);
-  return { text: recent.join(' | '), count: recent.length };
+  const recentPrompts = userPrompts.slice(-5);
+
+  const assistantBatches = entries.filter(
+    e => e.type === 'assistant' && e.images && e.images.length > 0
+  );
+  const batches = hasUserRefs
+    ? assistantBatches.slice(-1)
+    : assistantBatches.slice(-5);
+  const contextImages = batches.flatMap(e => e.images ?? []);
+
+  return {
+    recentPrompts,
+    contextImages,
+    promptCount: recentPrompts.length,
+    imageCount: contextImages.length,
+  };
 }
 
 function genId(): string {
@@ -75,6 +88,7 @@ export default function App() {
   const [pastedImages, setPastedImages] = useState<string[]>([]);
   const [editingConvId, setEditingConvId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [validationError, setValidationError] = useState('');
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -230,7 +244,38 @@ export default function App() {
 
     const convId = activeConvId;
     const userPrompt = prompt.trim();
-    const { count: contextCount } = buildContext(entries);
+
+    const urlRefs = showRefInput
+      ? refUrls.split('\n').map(u => u.trim()).filter(u => u.length > 0)
+      : [];
+    const allRefs = [...urlRefs, ...pastedImages];
+    const hasUserRefs = allRefs.length > 0;
+
+    const { recentPrompts, contextImages, promptCount, imageCount } =
+      buildContext(entries, hasUserRefs);
+
+    // Validate total reference images (user + context) <= 6
+    const totalRefs = allRefs.length + contextImages.length;
+    if (totalRefs > 6) {
+      setValidationError(
+        `参考图数量不能超过 6 张（当前 ${totalRefs} 张：用户 ${allRefs.length} + 上下文 ${contextImages.length}），请减少参考图或清空历史对话`
+      );
+      setTimeout(() => setValidationError(''), 5000);
+      return;
+    }
+    setValidationError('');
+
+    // Build enriched prompt with context
+    let enrichedPrompt = userPrompt;
+    if (recentPrompts.length > 0) {
+      const ctxSection = recentPrompts
+        .map((p, i) => `${i + 1}. ${p}`)
+        .join('\n');
+      enrichedPrompt = `【对话上下文 - 历史提示词】\n${ctxSection}\n\n【本次生成请求】\n${userPrompt}`;
+    }
+
+    // Merge reference images: user-provided + historical context images
+    const refImages = totalRefs > 0 ? [...allRefs, ...contextImages] : undefined;
 
     const userEntry: ConvEntry = {
       id: genId(),
@@ -248,12 +293,6 @@ export default function App() {
       timestamp: Date.now(),
       size,
     };
-
-    const urlRefs = showRefInput
-      ? refUrls.split('\n').map(u => u.trim()).filter(u => u.length > 0)
-      : [];
-    const allRefs = [...urlRefs, ...pastedImages];
-    const refImages = allRefs.length > 0 ? allRefs : undefined;
 
     setPrompt('');
     setPastedImages([]);
@@ -286,7 +325,8 @@ export default function App() {
         completedAt: endTime,
         imageCount: images.length,
         model,
-        contextCount,
+        contextCount: promptCount,
+        contextImageCount: imageCount,
       };
       const base = snapshotEntries.filter(e => e.id !== loadingEntry.id && e.id !== userEntry.id);
       const finalEntries = [...base, userEntry, done];
@@ -309,11 +349,10 @@ export default function App() {
       let images: string[] = [];
       let error: string | null = null;
 
-      // Use single API call with n: numImages (API handles batching internally)
       const result = await invoke<{ images: string[]; error: string | null }>(
         'generate_image',
         {
-          prompt: userPrompt,
+          prompt: enrichedPrompt,
           apiKey,
           apiUrl,
           model,
@@ -326,9 +365,8 @@ export default function App() {
       images = result.images ?? [];
       error = result.error ?? null;
 
-      // If single call returned 0 images and no error, or n>1 returned too few, try parallel fallback
       if (!error && images.length === 0 && numImages > 1) {
-        const promptsArr = Array(numImages).fill(userPrompt);
+        const promptsArr = Array(numImages).fill(enrichedPrompt);
         const results = await invoke<{ images: string[]; error: string | null }[]>(
           'generate_images_parallel',
           {
@@ -378,13 +416,15 @@ export default function App() {
 
   const clearHistory = () => {
     cancelledRef.current = true;
+    setValidationError('');
     if (activeConvId) {
       setLoadingConvs(prev => { const n = new Set(prev); n.delete(activeConvId); return n; });
     }
     saveEntries([]);
   };
 
-  const contextInfo = buildContext(entries);
+  const hasUserRefs = pastedImages.length > 0 || refUrls.split('\n').some(u => u.trim().length > 0);
+  const contextInfo = buildContext(entries, hasUserRefs);
 
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -507,9 +547,9 @@ export default function App() {
           </div>
           <div className="header-center" />
           <div className="header-right">
-            {contextInfo.count > 0 && (
-              <span className="context-badge" title={`上下文包含最近 ${contextInfo.count} 条提示词`}>
-                上下文: {contextInfo.count}
+            {(contextInfo.promptCount > 0 || contextInfo.imageCount > 0) && (
+              <span className="context-badge" title={`上下文：最近 ${contextInfo.promptCount} 条提示词 + ${contextInfo.imageCount} 张参考图`}>
+                上下文: {contextInfo.promptCount}提示/{contextInfo.imageCount}图
               </span>
             )}
             <button
@@ -645,14 +685,15 @@ export default function App() {
                             {entry.imageCount} 张
                           </span>
                         )}
-                        {entry.contextCount != null && entry.contextCount > 0 && (
-                          <span className="summary-item context-summary" title="使用了上下文压缩">
+                        {(entry.contextCount != null && entry.contextCount > 0) ||
+                         (entry.contextImageCount != null && entry.contextImageCount > 0) ? (
+                          <span className="summary-item context-summary" title="使用了上下文">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
                             </svg>
-                            上下文: {entry.contextCount}
+                            上下文: {entry.contextCount ?? 0}提示/{entry.contextImageCount ?? 0}图
                           </span>
-                        )}
+                        ) : null}
                         <span className="summary-item">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" />
@@ -693,6 +734,17 @@ export default function App() {
 
         {/* Input Area */}
         <footer className="input-area">
+          {validationError && (
+            <div className="validation-error">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span>{validationError}</span>
+              <button className="validation-close" onClick={() => setValidationError('')} title="关闭">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5" /></svg>
+              </button>
+            </div>
+          )}
           <div className="input-controls">
             <select
               className="model-select"
