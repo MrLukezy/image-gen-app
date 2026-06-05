@@ -41,11 +41,23 @@ function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
     .map(e => e.prompt!);
   const recentPrompts = userPrompts.slice(-5);
 
-  const assistantBatches = entries.filter(
-    e => e.type === 'assistant' && e.images && e.images.length > 0
-  );
-  const recentBatches = assistantBatches.slice(-5);
-  const contextImages = recentBatches.flatMap(e => e.images ?? []);
+  const lastAssistantImages = (() => {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.type === 'assistant' && e.images && e.images.length > 0) return e.images;
+    }
+    return [];
+  })();
+
+  const lastUserRefs = (() => {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.type === 'user' && e.refImages && e.refImages.length > 0) return e.refImages;
+    }
+    return [];
+  })();
+
+  const contextImages = [...lastUserRefs, ...lastAssistantImages];
   const totalImageCount = currentUserRefImageCount + contextImages.length;
 
   return {
@@ -54,7 +66,8 @@ function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
     promptCount: recentPrompts.length,
     userRefImageCount: currentUserRefImageCount,
     historyImageCount: contextImages.length,
-    historyBatchCount: recentBatches.length,
+    userHistoryRefCount: lastUserRefs.length,
+    historyBatchCount: lastAssistantImages.length > 0 ? 1 : 0,
     totalImageCount,
   };
 }
@@ -552,9 +565,8 @@ export default function App() {
           <div className="header-center" />
           <div className="header-right">
             {(contextInfo.promptCount > 0 || contextInfo.totalImageCount > 0) && (
-              <span className="context-badge" title={`上下文：${contextInfo.promptCount} 条提示词 + 用户${contextInfo.userRefImageCount}张 + 历史${contextInfo.historyImageCount}张参考图`}>
-                上下文: {contextInfo.promptCount}提示/总{contextInfo.totalImageCount}图
-                {contextInfo.userRefImageCount > 0 && ` (含上传${contextInfo.userRefImageCount})`}
+              <span className="context-badge" title={`上下文：${contextInfo.promptCount} 条提示词\n本次上传 ${contextInfo.userRefImageCount} 张\n历史参考图 ${contextInfo.historyImageCount} 张（用户参考${contextInfo.userHistoryRefCount}张 + 上次生成${contextInfo.historyBatchCount > 0 ? '1' : '0'}批）`}>
+                上下文: {contextInfo.promptCount}提示/{contextInfo.totalImageCount}图
               </span>
             )}
             <button
