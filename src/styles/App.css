@@ -1011,3 +1011,311 @@
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); max-height: 0; }
+  to { opacity: 1; transform: translateY(0); max-height: 400px; }
+}
+
+/* ── Preset Toggle Group ─────────────────────────────────────────────── */
+
+.preset-toggle-group {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.preset-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  position: relative;
+}
+
+.preset-toggle-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.preset-toggle-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.preset-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--accent);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  margin-left: 2px;
+}
+
+/* ── Active Presets Bar ──────────────────────────────────────────────── */
+
+.active-presets-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  animation: fadeIn 0.15s ease;
+}
+
+.active-presets-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.active-presets-chips {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.active-preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(201, 149, 108, 0.3);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--accent);
+  padding: 0;
+  transition: all 0.15s;
+}
+
+.chip-remove:hover {
+  background: rgba(201, 149, 108, 0.3);
+}
+
+.clear-presets-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.clear-presets-btn:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* ── Preset Panel ────────────────────────────────────────────────────── */
+
+.preset-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  animation: slideUp 0.2s ease;
+}
+
+.preset-category-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.preset-category-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.preset-cat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.preset-cat-tab:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.preset-cat-tab.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.cat-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.cat-name {
+  font-size: 12px;
+}
+
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 11px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.preset-chip:hover {
+  border-color: var(--accent);
+  background: rgba(201, 149, 108, 0.08);
+}
+
+.preset-chip.selected {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ── Templates Panel ─────────────────────────────────────────────────── */
+
+.templates-panel {
+  animation: slideUp 0.2s ease;
+}
+
+.templates-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+}
+
+.template-card:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  transform: translateY(-1px);
+}
+
+.template-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.template-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.template-card:hover .template-label {
+  color: var(--accent);
+}
+
+/* ── Preset Hover Preview Popup ──────────────────────────────────────── */
+
+.preset-preview-popup {
+  position: fixed;
+  z-index: 9999;
+  transform: translate(-50%, -100%);
+  pointer-events: auto;
+  animation: popIn 0.15s ease;
+}
+
+.preset-preview-popup img {
+  display: block;
+  width: 200px;
+  height: 200px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 2px solid var(--accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(201, 149, 108, 0.3);
+}
+
+.preset-preview-arrow {
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 14px;
+  height: 14px;
+  background: var(--bg-card);
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+@keyframes popIn {
+  from { opacity: 0; transform: translate(-50%, -100%) scale(0.85); }
+  to { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+}

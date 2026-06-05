@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { ConvEntry, Conversation } from './types';
+import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import {
   getAppConfig, saveAppConfig,
   getOpenWindowConvIds, saveOpenWindowConvIds,
@@ -105,6 +106,39 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState('');
   const [validationError, setValidationError] = useState('');
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [showPresets, setShowPresets] = useState(false);
+  const [selectedPresets, setSelectedPresets] = useState<Set<string>>(new Set());
+  const [activeCategory, setActiveCategory] = useState('style');
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [hoveredPreset, setHoveredPreset] = useState<{ img: string; x: number; y: number } | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handlePresetHover = (p: { img: string }, e: React.MouseEvent) => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setHoveredPreset({ img: p.img, x: rect.left + rect.width / 2, y: rect.top });
+  };
+
+  const handlePresetLeave = () => {
+    hoverTimer.current = setTimeout(() => setHoveredPreset(null), 200);
+  };
+
+  const togglePreset = (value: string) => {
+    setSelectedPresets(prev => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+  };
+
+  const injectTemplate = (tmplPrompt: string) => {
+    setPrompt(prev => prev.trim() ? `${prev}\n${tmplPrompt}` : tmplPrompt);
+    setShowTemplates(false);
+    inputRef.current?.focus();
+  };
+
+  const clearAllPresets = () => setSelectedPresets(new Set());
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -282,11 +316,27 @@ export default function App() {
 
     // Build enriched prompt with context
     let enrichedPrompt = userPrompt;
+
+    const presetParts: string[] = [];
+    const negativeParts: string[] = [];
+    selectedPresets.forEach(v => {
+      if (v.startsWith('[negative:')) negativeParts.push(v);
+      else presetParts.push(v);
+    });
+
+    if (presetParts.length > 0) {
+      enrichedPrompt += `\n\n[风格参数] ${presetParts.join(', ')}`;
+    }
+    if (negativeParts.length > 0) {
+      const negFlat = negativeParts.map(n => n.replace('[negative: ', '').replace(']', '')).join(', ');
+      enrichedPrompt += `\n\n[Negative prompt] ${negFlat}`;
+    }
+
     if (recentPrompts.length > 0) {
       const ctxSection = recentPrompts
         .map((p, i) => `${i + 1}. ${p}`)
         .join('\n');
-      enrichedPrompt = `【对话上下文 - 历史提示词】\n${ctxSection}\n\n【本次生成请求】\n${userPrompt}`;
+      enrichedPrompt = `【对话上下文 - 历史提示词】\n${ctxSection}\n\n【本次生成请求】\n${enrichedPrompt}`;
     }
 
     // Merge reference images: user-provided + historical context images
@@ -817,7 +867,115 @@ export default function App() {
                 disabled={isLoading}
               />
             </div>
+
+            <div className="preset-toggle-group">
+              <button
+                className={`preset-toggle-btn ${showPresets ? 'active' : ''}`}
+                onClick={() => { setShowPresets(!showPresets); setShowTemplates(false); }}
+                title="提示词预设"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
+                </svg>
+                预设
+                {selectedPresets.size > 0 && (
+                  <span className="preset-badge">{selectedPresets.size}</span>
+                )}
+              </button>
+              <button
+                className={`preset-toggle-btn ${showTemplates ? 'active' : ''}`}
+                onClick={() => { setShowTemplates(!showTemplates); setShowPresets(false); }}
+                title="快捷模板"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
+                </svg>
+                模板
+              </button>
+            </div>
           </div>
+
+          {selectedPresets.size > 0 && (
+            <div className="active-presets-bar">
+              <span className="active-presets-label">已选预设:</span>
+              <div className="active-presets-chips">
+                {Array.from(selectedPresets).map(v => {
+                  const preset = PRESET_CATEGORIES.flatMap(c => c.presets).find(p => p.value === v);
+                  return preset ? (
+                    <span key={v} className="active-preset-chip">
+                      {preset.label}
+                      <button onClick={() => togglePreset(v)} className="chip-remove">
+                        <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="2" /></svg>
+                      </button>
+                    </span>
+                  ) : null;
+                })}
+              </div>
+              <button className="clear-presets-btn" onClick={clearAllPresets} title="清除所有预设">
+                <svg width="10" height="10" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5" /></svg>
+                清空
+              </button>
+            </div>
+          )}
+
+          {showPresets && (
+            <div className="preset-panel">
+              <div className="preset-category-tabs">
+                {PRESET_CATEGORIES.map(cat => (
+                  <button
+                    key={cat.id}
+                    className={`preset-cat-tab ${activeCategory === cat.id ? 'active' : ''}`}
+                    onClick={() => setActiveCategory(cat.id)}
+                  >
+                    <span className="cat-icon">{cat.icon}</span>
+                    <span className="cat-name">{cat.name}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="preset-chips">
+                {PRESET_CATEGORIES.find(c => c.id === activeCategory)?.presets.map(p => {
+                  const isSelected = selectedPresets.has(p.value);
+                  return (
+                    <button
+                      key={p.value}
+                      className={`preset-chip ${isSelected ? 'selected' : ''}`}
+                      onClick={() => togglePreset(p.value)}
+                      onMouseEnter={(e) => handlePresetHover(p, e)}
+                      onMouseLeave={handlePresetLeave}
+                      title={p.value}
+                    >
+                      {isSelected && (
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {showTemplates && (
+            <div className="templates-panel">
+              <div className="templates-grid">
+                {QUICK_TEMPLATES.map((tmpl, i) => (
+                  <button
+                    key={i}
+                    className="template-card"
+                    onClick={() => injectTemplate(tmpl.prompt)}
+                    title={tmpl.prompt}
+                  >
+                    <span className="template-label">{tmpl.label}</span>
+                    <span className="template-desc">{tmpl.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {pastedImages.length > 0 && (
             <div className="pasted-images-bar">
@@ -936,6 +1094,19 @@ export default function App() {
             className="lightbox-img"
             onClick={e => e.stopPropagation()}
           />
+        </div>
+      )}
+
+      {/* ── Preset Hover Preview ────────────────────────────────────── */}
+      {hoveredPreset && (
+        <div
+          className="preset-preview-popup"
+          style={{ left: hoveredPreset.x, top: hoveredPreset.y - 12 }}
+          onMouseEnter={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }}
+          onMouseLeave={() => setHoveredPreset(null)}
+        >
+          <img src={hoveredPreset.img} alt="效果预览" />
+          <div className="preset-preview-arrow" />
         </div>
       )}
     </div>
