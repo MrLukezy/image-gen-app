@@ -35,11 +35,7 @@ function formatDuration(ms: number): string {
   return `${m}m ${rem}s`;
 }
 
-function buildContext(
-  entries: ConvEntry[],
-  hasUserRefs: boolean,
-  currentUserRefImageCount = 0
-) {
+function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
   const userPrompts = entries
     .filter(e => e.type === 'user' && e.prompt)
     .map(e => e.prompt!);
@@ -48,10 +44,8 @@ function buildContext(
   const assistantBatches = entries.filter(
     e => e.type === 'assistant' && e.images && e.images.length > 0
   );
-  const batches = hasUserRefs
-    ? assistantBatches.slice(-1)
-    : assistantBatches.slice(-5);
-  const contextImages = batches.flatMap(e => e.images ?? []);
+  const recentBatches = assistantBatches.slice(-5);
+  const contextImages = recentBatches.flatMap(e => e.images ?? []);
   const totalImageCount = currentUserRefImageCount + contextImages.length;
 
   return {
@@ -60,6 +54,7 @@ function buildContext(
     promptCount: recentPrompts.length,
     userRefImageCount: currentUserRefImageCount,
     historyImageCount: contextImages.length,
+    historyBatchCount: recentBatches.length,
     totalImageCount,
   };
 }
@@ -257,10 +252,9 @@ export default function App() {
       ? refUrls.split('\n').map(u => u.trim()).filter(u => u.length > 0)
       : [];
     const allRefs = [...urlRefs, ...pastedImages];
-    const hasUserRefs = allRefs.length > 0;
 
     const { recentPrompts, contextImages, promptCount, historyImageCount } =
-      buildContext(entries, hasUserRefs, allRefs.length);
+      buildContext(entries, allRefs.length);
 
     // Validate total reference images (user + context) <= 6
     const totalRefs = allRefs.length + historyImageCount;
@@ -432,10 +426,9 @@ export default function App() {
     saveEntries([]);
   };
 
-  const hasUserRefs = pastedImages.length > 0 || refUrls.split('\n').some(u => u.trim().length > 0);
   const currentUserRefCount =
     pastedImages.length + refUrls.split('\n').filter(u => u.trim().length > 0).length;
-  const contextInfo = buildContext(entries, hasUserRefs, currentUserRefCount);
+  const contextInfo = buildContext(entries, currentUserRefCount);
 
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
 
