@@ -6,6 +6,7 @@ import {
   getAppConfig, saveAppConfig,
   getOpenWindowConvIds, saveOpenWindowConvIds,
   getCurrConvId, setCurrConvId,
+  getCustomPresets, saveCustomPresets,
 } from './store';
 import './styles/App.css';
 
@@ -37,11 +38,6 @@ function formatDuration(ms: number): string {
 }
 
 function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
-  const userPrompts = entries
-    .filter(e => e.type === 'user' && e.prompt)
-    .map(e => e.prompt!);
-  const recentPrompts = userPrompts.slice(-5);
-
   const lastAssistantImages = (() => {
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
@@ -62,15 +58,16 @@ function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
   const totalImageCount = currentUserRefImageCount + contextImages.length;
 
   return {
-    recentPrompts,
     contextImages,
-    promptCount: recentPrompts.length,
     userRefImageCount: currentUserRefImageCount,
     historyImageCount: contextImages.length,
-    userHistoryRefCount: lastUserRefs.length,
-    historyBatchCount: lastAssistantImages.length > 0 ? 1 : 0,
     totalImageCount,
   };
+}
+
+interface ModelInfo {
+  id: string;
+  pricing?: string | null;
 }
 
 function genId(): string {
@@ -96,10 +93,9 @@ export default function App() {
   const [apiKey, setApiKey] = useState(config.apiKey);
   const [apiUrl, setApiUrl] = useState(config.apiUrl);
   const [model, setModel] = useState(config.model);
-  const [models, setModels] = useState<string[]>([config.model || 'gpt-image-2']);
+  const [models, setModels] = useState<ModelInfo[]>([{ id: config.model || 'gpt-image-2', pricing: null }]);
   const [loadingConvs, setLoadingConvs] = useState<Set<string>>(() => new Set());
   const isLoading = activeConvId ? loadingConvs.has(activeConvId) : false;
-  const [numImages, setNumImages] = useState(1);
   const [showRefInput, setShowRefInput] = useState(false);
   const [pastedImages, setPastedImages] = useState<string[]>([]);
   const [editingConvId, setEditingConvId] = useState<string | null>(null);
@@ -111,6 +107,10 @@ export default function App() {
   const [activeCategory, setActiveCategory] = useState('style');
   const [showTemplates, setShowTemplates] = useState(false);
   const [hoveredPreset, setHoveredPreset] = useState<{ img: string; x: number; y: number } | null>(null);
+  const [customPresets, setCustomPresets] = useState<{ label: string; value: string }[]>(() => getCustomPresets());
+  const [showAddCustomPreset, setShowAddCustomPreset] = useState(false);
+  const [newPresetLabel, setNewPresetLabel] = useState('');
+  const [newPresetValue, setNewPresetValue] = useState('');
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handlePresetHover = (p: { img: string }, e: React.MouseEvent) => {
@@ -281,11 +281,32 @@ export default function App() {
   const fetchModelsList = async () => {
     if (!apiKey) return;
     try {
-      const result = await invoke<string[]>('fetch_models', { apiKey, apiUrl });
+      const result = await invoke<ModelInfo[]>('fetch_models', { apiKey, apiUrl });
       if (result.length > 0) setModels(result);
     } catch {
       // ignore – keep defaults
     }
+  };
+
+  const addCustomPreset = () => {
+    if (!newPresetLabel.trim() || !newPresetValue.trim()) return;
+    const updated = [...customPresets, { label: newPresetLabel.trim(), value: newPresetValue.trim() }];
+    setCustomPresets(updated);
+    saveCustomPresets(updated);
+    setNewPresetLabel('');
+    setNewPresetValue('');
+    setShowAddCustomPreset(false);
+  };
+
+  const deleteCustomPreset = (value: string) => {
+    const updated = customPresets.filter(p => p.value !== value);
+    setCustomPresets(updated);
+    saveCustomPresets(updated);
+    setSelectedPresets(prev => {
+      const next = new Set(prev);
+      next.delete(value);
+      return next;
+    });
   };
 
   // ── Send ─────────────────────────────────────────────────────────────
@@ -300,7 +321,7 @@ export default function App() {
       : [];
     const allRefs = [...urlRefs, ...pastedImages];
 
-    const { recentPrompts, contextImages, promptCount, historyImageCount } =
+    const { contextImages, historyImageCount } =
       buildContext(entries, allRefs.length);
 
     // Validate total reference images (user + context) <= 6
@@ -330,13 +351,6 @@ export default function App() {
     if (negativeParts.length > 0) {
       const negFlat = negativeParts.map(n => n.replace('[negative: ', '').replace(']', '')).join(', ');
       enrichedPrompt += `\n\n[Negative prompt] ${negFlat}`;
-    }
-
-    if (recentPrompts.length > 0) {
-      const ctxSection = recentPrompts
-        .map((p, i) => `${i + 1}. ${p}`)
-        .join('\n');
-      enrichedPrompt = `【对话上下文 - 历史提示词】\n${ctxSection}\n\n【本次生成请求】\n${enrichedPrompt}`;
     }
 
     // Merge reference images: user-provided + historical context images
@@ -391,7 +405,6 @@ export default function App() {
         completedAt: endTime,
         imageCount: images.length,
         model,
-        contextCount: promptCount,
         contextImageCount: historyImageCount,
       };
       const base = snapshotEntries.filter(e => e.id !== loadingEntry.id && e.id !== userEntry.id);
@@ -423,32 +436,13 @@ export default function App() {
           apiUrl,
           model,
           size,
-          n: numImages,
+          n: 1,
           referenceImages: refImages,
           responseFormat: 'b64_json',
         },
       );
       images = result.images ?? [];
       error = result.error ?? null;
-
-      if (!error && images.length === 0 && numImages > 1) {
-        const promptsArr = Array(numImages).fill(enrichedPrompt);
-        const results = await invoke<{ images: string[]; error: string | null }[]>(
-          'generate_images_parallel',
-          {
-            prompts: promptsArr,
-            apiKey,
-            apiUrl,
-            model,
-            size,
-            referenceImages: refImages,
-            responseFormat: 'b64_json',
-          },
-        );
-        images = results.flatMap(r => r.images ?? []);
-        const errors = results.filter(r => r.error).map(r => r.error!);
-        if (errors.length > 0) error = errors.join('; ');
-      }
 
       finalize(images, error);
     } catch (err) {
@@ -492,6 +486,15 @@ export default function App() {
   const currentUserRefCount =
     pastedImages.length + refUrls.split('\n').filter(u => u.trim().length > 0).length;
   const contextInfo = buildContext(entries, currentUserRefCount);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) {
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+    }
+  }, [prompt]);
 
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -614,9 +617,9 @@ export default function App() {
           </div>
           <div className="header-center" />
           <div className="header-right">
-            {(contextInfo.promptCount > 0 || contextInfo.totalImageCount > 0) && (
-              <span className="context-badge" title={`上下文：${contextInfo.promptCount} 条提示词\n本次上传 ${contextInfo.userRefImageCount} 张\n历史参考图 ${contextInfo.historyImageCount} 张（用户参考${contextInfo.userHistoryRefCount}张 + 上次生成${contextInfo.historyBatchCount > 0 ? '1' : '0'}批）`}>
-                上下文: {contextInfo.promptCount}提示/{contextInfo.totalImageCount}图
+            {contextInfo.totalImageCount > 0 && (
+              <span className="context-badge" title={`上下文：本次上传 ${contextInfo.userRefImageCount} 张\n历史参考图 ${contextInfo.historyImageCount} 张`}>
+                上下文: {contextInfo.totalImageCount}图
               </span>
             )}
             <button
@@ -714,9 +717,7 @@ export default function App() {
                     {entry.loading && (
                       <div className="loading-container">
                         <div className="loading-spinner" />
-                        <span className="loading-text">
-                          {numImages > 1 ? `正在生成 ${numImages} 张图片...` : '正在生成图片...'}
-                        </span>
+                        <span className="loading-text">正在生成图片...</span>
                       </div>
                     )}
                     {entry.error && (
@@ -731,9 +732,15 @@ export default function App() {
                       <div className="image-grid">
                         {entry.images.map((img, i) => (
                           <div key={i} className="image-card">
-                            <img src={img} alt={`生成图片 ${i + 1}`} loading="lazy" />
+                            <img
+                              src={img}
+                              alt={`生成图片 ${i + 1}`}
+                              loading="lazy"
+                              onClick={() => setLightboxSrc(img)}
+                              style={{ cursor: 'zoom-in' }}
+                            />
                             <div className="image-overlay">
-                              <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开">
+                              <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                   <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                                   <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
@@ -764,13 +771,12 @@ export default function App() {
                             {entry.imageCount} 张
                           </span>
                         )}
-                        {(entry.contextCount != null && entry.contextCount > 0) ||
-                         (entry.contextImageCount != null && entry.contextImageCount > 0) ? (
-                          <span className="summary-item context-summary" title="使用了上下文">
+                        {entry.contextImageCount != null && entry.contextImageCount > 0 ? (
+                          <span className="summary-item context-summary" title="使用了上下文参考图">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
                             </svg>
-                            上下文: {entry.contextCount ?? 0}提示/{entry.contextImageCount ?? 0}图
+                            上下文: {entry.contextImageCount}图
                           </span>
                         ) : null}
                         <span className="summary-item">
@@ -833,9 +839,11 @@ export default function App() {
               title="选择模型"
             >
               {models.map(m => (
-                <option key={m} value={m}>{m}</option>
+                <option key={m.id} value={m.id}>
+                  {m.id}{m.pricing ? ` (${m.pricing})` : ''}
+                </option>
               ))}
-              {model && !models.includes(model) && (
+              {model && !models.find(m => m.id === model) && (
                 <option value={model}>{model} (自定义)</option>
               )}
             </select>
@@ -851,22 +859,6 @@ export default function App() {
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
-
-            <div className="num-wrapper" title="生成数量 (并行生成)">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
-                <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
-              </svg>
-              <input
-                className="num-input"
-                type="number"
-                min={1}
-                max={8}
-                value={numImages}
-                onChange={e => setNumImages(Math.max(1, Math.min(8, Number(e.target.value))))}
-                disabled={isLoading}
-              />
-            </div>
 
             <div className="preset-toggle-group">
               <button
@@ -902,7 +894,8 @@ export default function App() {
               <span className="active-presets-label">已选预设:</span>
               <div className="active-presets-chips">
                 {Array.from(selectedPresets).map(v => {
-                  const preset = PRESET_CATEGORIES.flatMap(c => c.presets).find(p => p.value === v);
+                  const preset = PRESET_CATEGORIES.flatMap(c => c.presets).find(p => p.value === v)
+                    ?? customPresets.find(p => p.value === v);
                   return preset ? (
                     <span key={v} className="active-preset-chip">
                       {preset.label}
@@ -933,29 +926,95 @@ export default function App() {
                     <span className="cat-name">{cat.name}</span>
                   </button>
                 ))}
+                <button
+                  className={`preset-cat-tab ${activeCategory === '__custom__' ? 'active' : ''}`}
+                  onClick={() => setActiveCategory('__custom__')}
+                >
+                  <span className="cat-icon">✏️</span>
+                  <span className="cat-name">自定义</span>
+                </button>
               </div>
-              <div className="preset-chips">
-                {PRESET_CATEGORIES.find(c => c.id === activeCategory)?.presets.map(p => {
-                  const isSelected = selectedPresets.has(p.value);
-                  return (
-                    <button
-                      key={p.value}
-                      className={`preset-chip ${isSelected ? 'selected' : ''}`}
-                      onClick={() => togglePreset(p.value)}
-                      onMouseEnter={(e) => handlePresetHover(p, e)}
-                      onMouseLeave={handlePresetLeave}
-                      title={p.value}
-                    >
-                      {isSelected && (
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                      )}
-                      {p.label}
+              {activeCategory !== '__custom__' ? (
+                <div className="preset-chips">
+                  {PRESET_CATEGORIES.find(c => c.id === activeCategory)?.presets.map(p => {
+                    const isSelected = selectedPresets.has(p.value);
+                    return (
+                      <button
+                        key={p.value}
+                        className={`preset-chip ${isSelected ? 'selected' : ''}`}
+                        onClick={() => togglePreset(p.value)}
+                        onMouseEnter={(e) => handlePresetHover(p, e)}
+                        onMouseLeave={handlePresetLeave}
+                        title={p.value}
+                      >
+                        {isSelected && (
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="preset-chips">
+                  {customPresets.map(p => {
+                    const isSelected = selectedPresets.has(p.value);
+                    return (
+                      <span key={p.value} className={`preset-chip ${isSelected ? 'selected' : ''}`}>
+                        <button
+                          className="custom-preset-label"
+                          onClick={() => togglePreset(p.value)}
+                        >
+                          {isSelected && (
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          )}
+                          {p.label}
+                        </button>
+                        <button
+                          className="custom-preset-delete"
+                          title="删除预设"
+                          onClick={() => deleteCustomPreset(p.value)}
+                        >
+                          <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="2" /></svg>
+                        </button>
+                      </span>
+                    );
+                  })}
+                  {showAddCustomPreset ? (
+                    <div className="custom-preset-form">
+                      <input
+                        className="custom-preset-input"
+                        placeholder="预设名称"
+                        value={newPresetLabel}
+                        onChange={e => setNewPresetLabel(e.target.value)}
+                        autoFocus
+                      />
+                      <textarea
+                        className="custom-preset-textarea"
+                        placeholder="预设提示词内容（例如：cinematic lighting, high detail）"
+                        value={newPresetValue}
+                        onChange={e => setNewPresetValue(e.target.value)}
+                        rows={2}
+                      />
+                      <div className="custom-preset-form-actions">
+                        <button className="custom-preset-save" onClick={addCustomPreset}>保存</button>
+                        <button className="custom-preset-cancel" onClick={() => setShowAddCustomPreset(false)}>取消</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="preset-chip add-custom-preset-btn" onClick={() => setShowAddCustomPreset(true)}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      添加预设
                     </button>
-                  );
-                })}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

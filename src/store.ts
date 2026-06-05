@@ -87,3 +87,24 @@ export function getCurrConvId(): string | null {
 export function setCurrConvId(id: string) {
   setLocal(CURR_CONV_KEY, id);
 }
+
+// ──────────────────────────── Custom Presets ────────────────────────────────
+
+const CUSTOM_PRESETS_KEY = 'image_gen_custom_presets';
+
+export function getCustomPresets(): { label: string; value: string }[] {
+  const raw = getLocal(CUSTOM_PRESETS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      // fallthrough
+    }
+  }
+  return [];
+}
+
+export function saveCustomPresets(presets: { label: string; value: string }[]) {
+  setLocal(CUSTOM_PRESETS_KEY, JSON.stringify(presets));
+}

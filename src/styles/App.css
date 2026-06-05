@@ -1319,3 +1319,125 @@
   from { opacity: 0; transform: translate(-50%, -100%) scale(0.85); }
   to { opacity: 1; transform: translate(-50%, -100%) scale(1); }
 }
+
+/* ── Custom Presets ──────────────────────────────────────────────────────── */
+
+.custom-preset-label {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.custom-preset-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 0;
+  margin-left: 2px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.custom-preset-delete:hover {
+  background: rgba(229, 83, 75, 0.3);
+  color: var(--error);
+}
+
+.custom-preset-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.custom-preset-input,
+.custom-preset-textarea {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  resize: none;
+  transition: border-color 0.2s;
+}
+
+.custom-preset-textarea {
+  font-family: monospace;
+}
+
+.custom-preset-input:focus,
+.custom-preset-textarea:focus {
+  border-color: var(--accent);
+}
+
+.custom-preset-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.custom-preset-save,
+.custom-preset-cancel {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.custom-preset-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.custom-preset-save:hover {
+  background: var(--accent-hover);
+}
+
+.custom-preset-cancel:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.add-custom-preset-btn {
+  border-style: dashed !important;
+  background: transparent !important;
+}
+
+.add-custom-preset-btn:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: var(--accent-dim) !important;
+}
+
+/* ── Image Card Click ────────────────────────────────────────────────────── */
+
+.image-card img {
+  cursor: zoom-in;
+}

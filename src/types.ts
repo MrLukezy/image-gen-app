@@ -12,7 +12,6 @@ export interface ConvEntry {
   completedAt?: number;
   imageCount?: number;
   model?: string;
-  contextCount?: number;
   contextImageCount?: number;
 }
 

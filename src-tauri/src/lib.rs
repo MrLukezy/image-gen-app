@@ -36,6 +36,8 @@ struct ConvEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ref_images: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     loading: Option<bool>,
@@ -52,6 +54,8 @@ struct ConvEntry {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_image_count: Option<u32>,
 }
 
 // ──────────────────────────── HTTP Client ─────────────────────────────────
@@ -128,9 +132,40 @@ struct ModelsResp {
     data: Option<Vec<ModelEntry>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ModelEntry {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing: Option<ModelPricing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ModelPricing {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub pricing: Option<String>,
+}
+
+fn is_image_model(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    let image_keywords = [
+        "image", "dall-e", "dalle", "gpt-image", "flux", "stable-diffusion",
+        "sdxl", "midjourney", "kandinsky", "playground", "kolors", "cogview",
+        "wan", "ideogram", "recraft", "black-forest-labs", "stability",
+        "seedream", "jimeng",
+    ];
+    image_keywords.iter().any(|kw| lower.contains(kw))
 }
 
 // ──────────────────────────── Helpers ─────────────────────────────────────
@@ -430,7 +465,7 @@ async fn generate_images_parallel(
 }
 
 #[tauri::command]
-async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<String>, String> {
+async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<ModelInfo>, String> {
     let base = if api_url.contains("/images/generations") {
         api_url.replace("/images/generations", "")
     } else if api_url.ends_with("/v1") {
@@ -455,11 +490,24 @@ async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<String>, S
     let parsed: ModelsResp = serde_json::from_str(&body)
         .map_err(|e| format!("解析响应失败: {}", e))?;
 
-    let models: Vec<String> = parsed
+    let models: Vec<ModelInfo> = parsed
         .data
         .unwrap_or_default()
         .into_iter()
-        .map(|m| m.id)
+        .filter(|m| is_image_model(&m.id))
+        .map(|m| {
+            let pricing = m.pricing.and_then(|p| {
+                p.image
+                    .or(p.output)
+                    .or(p.input)
+                    .map(|v| {
+                        let val: f64 = v.parse().unwrap_or(0.0);
+                        if val > 0.0 { format!("${:.4}", val) } else { String::new() }
+                    })
+                    .filter(|s| !s.is_empty())
+            });
+            ModelInfo { id: m.id, pricing }
+        })
         .collect();
     Ok(models)
 }
