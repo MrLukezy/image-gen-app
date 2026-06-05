@@ -1,6 +1,51 @@
+export interface Provider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  createdAt: string;
+}
+
+export const PROVIDER_PRESETS = [
+  { value: "hfsy", label: "HFSY", baseUrl: "https://www.hfsyapi.cn/v1/images/generations" },
+  { value: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1/images/generations" },
+  { value: "siliconflow", label: "SiliconFlow", baseUrl: "https://api.siliconflow.cn/v1/images/generations" },
+  { value: "zhipu", label: "Zhipu (GLM-Image)", baseUrl: "https://open.bigmodel.cn/api/paas/v4/images/generations" },
+  { value: "volcengine", label: "火山方舟 (即梦/Seedream)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3/images/generations" },
+  { value: "minimax", label: "MiniMax (Image-01)", baseUrl: "https://api.minimax.chat/v1/image_generation" },
+  { value: "custom", label: "自定义", baseUrl: "" },
+];
+
+export function getProviders(): Provider[] {
+  const raw = getLocal(PROVIDERS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      // fallthrough
+    }
+  }
+  return [];
+}
+
+export function saveProviders(providers: Provider[]) {
+  setLocal(PROVIDERS_KEY, JSON.stringify(providers));
+}
+
+export function getActiveProviderId(): string | null {
+  return getLocal(ACTIVE_PROVIDER_KEY);
+}
+
+export function saveActiveProviderId(id: string) {
+  setLocal(ACTIVE_PROVIDER_KEY, id);
+}
+
 const STORE_KEY = 'image_gen_state';
 const DEFAULT_API_URL = 'https://www.hfsyapi.cn/v1/images/generations';
 const DEFAULT_MODEL = 'gpt-image-2';
+const PROVIDERS_KEY = 'image_gen_providers';
+const ACTIVE_PROVIDER_KEY = 'image_gen_active_provider';
 
 export function getLocal(key: string): string | null {
   try {
@@ -32,6 +77,7 @@ interface PersistedState {
   apiUrl: string;
   apiKey: string;
   model: string;
+  activeProviderId?: string;
 }
 
 export function getAppConfig(): PersistedState {
@@ -39,10 +85,12 @@ export function getAppConfig(): PersistedState {
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
+      const provId = parsed.activeProviderId || getActiveProviderId();
       return {
         apiUrl: parsed.apiUrl || DEFAULT_API_URL,
         apiKey: parsed.apiKey || '',
         model: parsed.model || DEFAULT_MODEL,
+        activeProviderId: provId || undefined,
       };
     } catch {
       // fallthrough
@@ -53,6 +101,9 @@ export function getAppConfig(): PersistedState {
 
 export function saveAppConfig(config: PersistedState) {
   setLocal(STORE_KEY, JSON.stringify(config));
+  if (config.activeProviderId) {
+    saveActiveProviderId(config.activeProviderId);
+  }
 }
 
 // ──────────────────────────── Open Windows ────────────────────────────────

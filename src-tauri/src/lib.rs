@@ -155,6 +155,7 @@ struct ModelPricing {
 pub struct ModelInfo {
     pub id: String,
     pub pricing: Option<String>,
+    pub resolution: Option<String>,
 }
 
 fn is_image_model(id: &str) -> bool {
@@ -163,9 +164,20 @@ fn is_image_model(id: &str) -> bool {
         "image", "dall-e", "dalle", "gpt-image", "flux", "stable-diffusion",
         "sdxl", "midjourney", "kandinsky", "playground", "kolors", "cogview",
         "wan", "ideogram", "recraft", "black-forest-labs", "stability",
-        "seedream", "jimeng",
+        "seedream", "jimeng", "qwen-image", "tongyi-wanxiang", "minimax-image",
     ];
     image_keywords.iter().any(|kw| lower.contains(kw))
+}
+
+fn detect_resolution(id: &str) -> Option<String> {
+    let lower = id.to_lowercase();
+    if lower.contains("4k") || lower.contains("2048") || lower.contains("ultra") || lower.contains("max") {
+        Some("4K".to_string())
+    } else if lower.contains("2k") || lower.contains("1024") || lower.contains("hd") || lower.contains("high") || lower.contains("pro") {
+        Some("2K".to_string())
+    } else {
+        Some("1K".to_string())
+    }
 }
 
 // ──────────────────────────── Helpers ─────────────────────────────────────
@@ -467,11 +479,17 @@ async fn generate_images_parallel(
 #[tauri::command]
 async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<ModelInfo>, String> {
     let base = if api_url.contains("/images/generations") {
-        api_url.replace("/images/generations", "")
-    } else if api_url.ends_with("/v1") {
+        api_url.replace("/images/generations", "").replace("/image_generation", "")
+    } else if api_url.contains("/image_generation") {
+        api_url.replace("/image_generation", "")
+    } else if api_url.ends_with("/v1") || api_url.ends_with("/v4") || api_url.ends_with("/api") {
         api_url
+    } else if api_url.contains("/v1/") || api_url.contains("/v4/") {
+        api_url.rsplit_once("/v1/").map(|(s, _)| format!("{}/v1", s))
+            .or_else(|| api_url.rsplit_once("/v4/").map(|(s, _)| format!("{}/v4", s)))
+            .unwrap_or_else(|| api_url.clone())
     } else {
-        format!("{}/v1", api_url.trim_end_matches('/'))
+        api_url.trim_end_matches('/').to_string()
     };
     let url = format!("{}/models", base);
 
@@ -506,7 +524,8 @@ async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<ModelInfo>
                     })
                     .filter(|s| !s.is_empty())
             });
-            ModelInfo { id: m.id, pricing }
+            let resolution = detect_resolution(&m.id);
+            ModelInfo { id: m.id, pricing, resolution }
         })
         .collect();
     Ok(models)

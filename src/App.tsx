@@ -7,6 +7,9 @@ import {
   getOpenWindowConvIds, saveOpenWindowConvIds,
   getCurrConvId, setCurrConvId,
   getCustomPresets, saveCustomPresets,
+  getProviders, saveProviders, getActiveProviderId, saveActiveProviderId,
+  PROVIDER_PRESETS,
+  type Provider,
 } from './store';
 import './styles/App.css';
 
@@ -68,6 +71,7 @@ function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
 interface ModelInfo {
   id: string;
   pricing?: string | null;
+  resolution?: string | null;
 }
 
 function genId(): string {
@@ -82,6 +86,32 @@ function getConvIdFromUrl(): string | null {
 
 export default function App() {
   const config = getAppConfig();
+  const [providers, setProvidersState] = useState<Provider[]>(() => {
+    const stored = getProviders();
+    if (stored.length > 0) return stored;
+    if (config.apiKey && config.apiUrl) {
+      const defaultProvider: Provider = {
+        id: genId(),
+        name: '默认代理',
+        baseUrl: config.apiUrl,
+        apiKey: config.apiKey,
+        createdAt: new Date().toISOString(),
+      };
+      saveProviders([defaultProvider]);
+      return [defaultProvider];
+    }
+    return [];
+  });
+
+  const resolveInitialProvider = () => {
+    const savedId = config.activeProviderId || getActiveProviderId();
+    if (savedId && providers.find(p => p.id === savedId)) return savedId;
+    return providers[0]?.id || '';
+  };
+
+  const [activeProviderId, setActiveProviderId] = useState<string>(() => resolveInitialProvider());
+  const activeProvider = providers.find(p => p.id === activeProviderId);
+
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string>('');
   const [entries, setEntries] = useState<ConvEntry[]>([]);
@@ -90,10 +120,10 @@ export default function App() {
   const [refUrls, setRefUrls] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
-  const [apiKey, setApiKey] = useState(config.apiKey);
-  const [apiUrl, setApiUrl] = useState(config.apiUrl);
+  const [apiKey, setApiKey] = useState(activeProvider?.apiKey || config.apiKey);
+  const [apiUrl, setApiUrl] = useState(activeProvider?.baseUrl || config.apiUrl);
   const [model, setModel] = useState(config.model);
-  const [models, setModels] = useState<ModelInfo[]>([{ id: config.model || 'gpt-image-2', pricing: null }]);
+  const [models, setModels] = useState<ModelInfo[]>([{ id: config.model || 'gpt-image-2', pricing: null, resolution: null }]);
   const [loadingConvs, setLoadingConvs] = useState<Set<string>>(() => new Set());
   const isLoading = activeConvId ? loadingConvs.has(activeConvId) : false;
   const [showRefInput, setShowRefInput] = useState(false);
@@ -111,6 +141,12 @@ export default function App() {
   const [showAddCustomPreset, setShowAddCustomPreset] = useState(false);
   const [newPresetLabel, setNewPresetLabel] = useState('');
   const [newPresetValue, setNewPresetValue] = useState('');
+  const [showProviderForm, setShowProviderForm] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
+  const [providerFormPreset, setProviderFormPreset] = useState('custom');
+  const [providerFormName, setProviderFormName] = useState('');
+  const [providerFormUrl, setProviderFormUrl] = useState('');
+  const [providerFormKey, setProviderFormKey] = useState('');
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handlePresetHover = (p: { img: string }, e: React.MouseEvent) => {
@@ -140,6 +176,97 @@ export default function App() {
 
   const clearAllPresets = () => setSelectedPresets(new Set());
 
+  const switchProvider = (provId: string) => {
+    const prov = providers.find(p => p.id === provId);
+    if (prov) {
+      setActiveProviderId(provId);
+      setApiKey(prov.apiKey);
+      setApiUrl(prov.baseUrl);
+      saveActiveProviderId(provId);
+      setModels(prev => (prev.length > 0 ? prev : [{ id: model || 'gpt-image-2', pricing: null, resolution: null }]));
+    }
+  };
+
+  const addOrUpdateProvider = () => {
+    if (!providerFormName.trim() || !providerFormUrl.trim() || !providerFormKey.trim()) return;
+    if (editingProvider) {
+      const updated = providers.map(p =>
+        p.id === editingProvider.id
+          ? { ...p, name: providerFormName.trim(), baseUrl: providerFormUrl.trim(), apiKey: providerFormKey.trim() }
+          : p
+      );
+      setProvidersState(updated);
+      saveProviders(updated);
+      if (activeProviderId === editingProvider.id) {
+        setApiKey(providerFormKey.trim());
+        setApiUrl(providerFormUrl.trim());
+      }
+    } else {
+      const newProv: Provider = {
+        id: genId(),
+        name: providerFormName.trim(),
+        baseUrl: providerFormUrl.trim(),
+        apiKey: providerFormKey.trim(),
+        createdAt: new Date().toISOString(),
+      };
+      const updated = [...providers, newProv];
+      setProvidersState(updated);
+      saveProviders(updated);
+      if (providers.length === 0) {
+        switchProvider(newProv.id);
+      }
+    }
+    setShowProviderForm(false);
+    setEditingProvider(null);
+    setProviderFormPreset('custom');
+    setProviderFormName('');
+    setProviderFormUrl('');
+    setProviderFormKey('');
+  };
+
+  const deleteProvider = (provId: string) => {
+    const updated = providers.filter(p => p.id !== provId);
+    setProvidersState(updated);
+    saveProviders(updated);
+    if (activeProviderId === provId) {
+      if (updated.length > 0) {
+        switchProvider(updated[0].id);
+      } else {
+        setActiveProviderId('');
+        setApiKey('');
+        setApiUrl('');
+      }
+    }
+  };
+
+  const openAddProviderForm = () => {
+    setEditingProvider(null);
+    setProviderFormPreset('custom');
+    setProviderFormName('');
+    setProviderFormUrl('');
+    setProviderFormKey('');
+    setShowProviderForm(true);
+  };
+
+  const openEditProviderForm = (prov: Provider) => {
+    setEditingProvider(prov);
+    const matchedPreset = PROVIDER_PRESETS.find(p => p.value !== 'custom' && prov.baseUrl.includes(p.baseUrl.replace('/v1/images/generations', '').replace('/v1', '')));
+    setProviderFormPreset(matchedPreset?.value || 'custom');
+    setProviderFormName(prov.name);
+    setProviderFormUrl(prov.baseUrl);
+    setProviderFormKey(prov.apiKey);
+    setShowProviderForm(true);
+  };
+
+  const handleProviderPresetChange = (presetValue: string) => {
+    setProviderFormPreset(presetValue);
+    const preset = PROVIDER_PRESETS.find(p => p.value === presetValue);
+    if (preset && presetValue !== 'custom') {
+      setProviderFormUrl(preset.baseUrl);
+      if (!providerFormName) setProviderFormName(preset.label);
+    }
+  };
+
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const cancelledRef = useRef(false);
@@ -163,8 +290,8 @@ export default function App() {
   }, [activeConvId]);
 
   useEffect(() => {
-    saveAppConfig({ apiUrl, apiKey, model });
-  }, [apiUrl, apiKey, model]);
+    saveAppConfig({ apiUrl, apiKey, model, activeProviderId });
+  }, [apiUrl, apiKey, model, activeProviderId]);
 
   const loadConversations = async () => {
     try {
@@ -831,6 +958,20 @@ export default function App() {
             </div>
           )}
           <div className="input-controls">
+            {providers.length > 0 && (
+              <select
+                className="provider-select"
+                value={activeProviderId}
+                onChange={e => switchProvider(e.target.value)}
+                disabled={isLoading}
+                title="选择代理"
+              >
+                {providers.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            )}
+
             <select
               className="model-select"
               value={model}
@@ -840,7 +981,7 @@ export default function App() {
             >
               {models.map(m => (
                 <option key={m.id} value={m.id}>
-                  {m.id}{m.pricing ? ` (${m.pricing})` : ''}
+                  {m.id}{m.resolution ? ` [${m.resolution}]` : ''}{m.pricing ? ` (${m.pricing})` : ''}
                 </option>
               ))}
               {model && !models.find(m => m.id === model) && (
@@ -1095,6 +1236,97 @@ export default function App() {
               </button>
             </div>
             <div className="settings-body">
+              <div className="setting-item">
+                <label>代理 (Provider)</label>
+                <div className="provider-list">
+                  {providers.map(prov => (
+                    <div key={prov.id} className={`provider-item ${prov.id === activeProviderId ? 'active' : ''}`}>
+                      <div className="provider-item-main" onClick={() => switchProvider(prov.id)}>
+                        <span className="provider-item-name">{prov.name}</span>
+                        <span className="provider-item-url">{prov.baseUrl.replace(/https?:\/\//, '')}</span>
+                      </div>
+                      <div className="provider-item-actions">
+                        <button
+                          className="provider-action-btn"
+                          onClick={e => { e.stopPropagation(); openEditProviderForm(prov); }}
+                          title="编辑"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                          </svg>
+                        </button>
+                        <button
+                          className="provider-action-btn provider-delete-btn"
+                          onClick={e => { e.stopPropagation(); deleteProvider(prov.id); }}
+                          title="删除"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <button className="provider-add-btn" onClick={openAddProviderForm}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                    添加代理
+                  </button>
+                </div>
+              </div>
+
+              {showProviderForm && (
+                <div className="provider-form">
+                  <div className="provider-form-header">
+                    <span>{editingProvider ? '编辑代理' : '添加代理'}</span>
+                    <button className="provider-form-close" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                  <select
+                    className="provider-form-select"
+                    value={providerFormPreset}
+                    onChange={e => handleProviderPresetChange(e.target.value)}
+                  >
+                    {PROVIDER_PRESETS.map(p => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    className="provider-form-input"
+                    placeholder="代理名称"
+                    value={providerFormName}
+                    onChange={e => setProviderFormName(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="provider-form-input"
+                    placeholder="API 地址 (https://...)"
+                    value={providerFormUrl}
+                    onChange={e => setProviderFormUrl(e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    className="provider-form-input"
+                    placeholder="API Key"
+                    value={providerFormKey}
+                    onChange={e => setProviderFormKey(e.target.value)}
+                  />
+                  <div className="provider-form-actions">
+                    <button className="provider-form-save" onClick={addOrUpdateProvider}>
+                      {editingProvider ? '保存' : '添加'}
+                    </button>
+                    <button className="provider-form-cancel" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="setting-item">
                 <label>API Key</label>
                 <input
