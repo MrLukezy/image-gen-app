@@ -35,7 +35,11 @@ function formatDuration(ms: number): string {
   return `${m}m ${rem}s`;
 }
 
-function buildContext(entries: ConvEntry[], hasUserRefs: boolean) {
+function buildContext(
+  entries: ConvEntry[],
+  hasUserRefs: boolean,
+  currentUserRefImageCount = 0
+) {
   const userPrompts = entries
     .filter(e => e.type === 'user' && e.prompt)
     .map(e => e.prompt!);
@@ -48,12 +52,15 @@ function buildContext(entries: ConvEntry[], hasUserRefs: boolean) {
     ? assistantBatches.slice(-1)
     : assistantBatches.slice(-5);
   const contextImages = batches.flatMap(e => e.images ?? []);
+  const totalImageCount = currentUserRefImageCount + contextImages.length;
 
   return {
     recentPrompts,
     contextImages,
     promptCount: recentPrompts.length,
-    imageCount: contextImages.length,
+    userRefImageCount: currentUserRefImageCount,
+    historyImageCount: contextImages.length,
+    totalImageCount,
   };
 }
 
@@ -89,6 +96,7 @@ export default function App() {
   const [editingConvId, setEditingConvId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [validationError, setValidationError] = useState('');
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -251,11 +259,11 @@ export default function App() {
     const allRefs = [...urlRefs, ...pastedImages];
     const hasUserRefs = allRefs.length > 0;
 
-    const { recentPrompts, contextImages, promptCount, imageCount } =
-      buildContext(entries, hasUserRefs);
+    const { recentPrompts, contextImages, promptCount, historyImageCount } =
+      buildContext(entries, hasUserRefs, allRefs.length);
 
     // Validate total reference images (user + context) <= 6
-    const totalRefs = allRefs.length + contextImages.length;
+    const totalRefs = allRefs.length + historyImageCount;
     if (totalRefs > 6) {
       setValidationError(
         `参考图数量不能超过 6 张（当前 ${totalRefs} 张：用户 ${allRefs.length} + 上下文 ${contextImages.length}），请减少参考图或清空历史对话`
@@ -284,6 +292,7 @@ export default function App() {
       timestamp: Date.now(),
       size,
       model,
+      refImages: allRefs.length > 0 ? allRefs : undefined,
     };
 
     const loadingEntry: ConvEntry = {
@@ -326,7 +335,7 @@ export default function App() {
         imageCount: images.length,
         model,
         contextCount: promptCount,
-        contextImageCount: imageCount,
+        contextImageCount: historyImageCount,
       };
       const base = snapshotEntries.filter(e => e.id !== loadingEntry.id && e.id !== userEntry.id);
       const finalEntries = [...base, userEntry, done];
@@ -424,7 +433,9 @@ export default function App() {
   };
 
   const hasUserRefs = pastedImages.length > 0 || refUrls.split('\n').some(u => u.trim().length > 0);
-  const contextInfo = buildContext(entries, hasUserRefs);
+  const currentUserRefCount =
+    pastedImages.length + refUrls.split('\n').filter(u => u.trim().length > 0).length;
+  const contextInfo = buildContext(entries, hasUserRefs, currentUserRefCount);
 
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -547,9 +558,10 @@ export default function App() {
           </div>
           <div className="header-center" />
           <div className="header-right">
-            {(contextInfo.promptCount > 0 || contextInfo.imageCount > 0) && (
-              <span className="context-badge" title={`上下文：最近 ${contextInfo.promptCount} 条提示词 + ${contextInfo.imageCount} 张参考图`}>
-                上下文: {contextInfo.promptCount}提示/{contextInfo.imageCount}图
+            {(contextInfo.promptCount > 0 || contextInfo.totalImageCount > 0) && (
+              <span className="context-badge" title={`上下文：${contextInfo.promptCount} 条提示词 + 用户${contextInfo.userRefImageCount}张 + 历史${contextInfo.historyImageCount}张参考图`}>
+                上下文: {contextInfo.promptCount}提示/总{contextInfo.totalImageCount}图
+                {contextInfo.userRefImageCount > 0 && ` (含上传${contextInfo.userRefImageCount})`}
               </span>
             )}
             <button
@@ -616,6 +628,18 @@ export default function App() {
                     </svg>
                   </div>
                   <div className="msg-body">
+                    {entry.refImages && entry.refImages.length > 0 && (
+                      <div className="ref-images-bar">
+                        <span className="ref-images-label">参考图 ({entry.refImages.length})</span>
+                        <div className="ref-images-grid">
+                          {entry.refImages.map((src, i) => (
+                            <div key={i} className="ref-thumb" onClick={() => setLightboxSrc(src)} title="点击查看原图">
+                              <img src={src} alt={`参考图 ${i + 1}`} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="msg-text">{entry.prompt}</div>
                     <div className="msg-meta">
                       <span className="meta-time">{formatTime(entry.timestamp)}</span>
@@ -890,6 +914,23 @@ export default function App() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Lightbox ─────────────────────────────────────────────────── */}
+      {lightboxSrc && (
+        <div className="lightbox-overlay" onClick={() => setLightboxSrc(null)}>
+          <button className="lightbox-close" onClick={() => setLightboxSrc(null)} title="关闭">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+          <img
+            src={lightboxSrc}
+            alt="参考图预览"
+            className="lightbox-img"
+            onClick={e => e.stopPropagation()}
+          />
         </div>
       )}
     </div>

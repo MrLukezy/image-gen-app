@@ -3,6 +3,7 @@ export interface ConvEntry {
   type: 'user' | 'assistant';
   prompt?: string;
   images?: string[];
+  refImages?: string[];
   error?: string;
   loading?: boolean;
   timestamp: number;
