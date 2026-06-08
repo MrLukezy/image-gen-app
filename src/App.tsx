@@ -275,6 +275,8 @@ export default function App() {
   const cancelledRef = useRef(false);
   const activeConvIdRef = useRef(activeConvId);
   activeConvIdRef.current = activeConvId;
+  const loadConvsRunningRef = useRef(false);
+  const loadConvsQueuedRef = useRef(false);
 
   // ── Init ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -297,6 +299,11 @@ export default function App() {
   }, [apiUrl, apiKey, model, activeProviderId]);
 
   const loadConversations = async () => {
+    if (loadConvsRunningRef.current) {
+      loadConvsQueuedRef.current = true;
+      return;
+    }
+    loadConvsRunningRef.current = true;
     try {
       const all = await invoke<Conversation[]>('list_conversations');
       setConversations(all);
@@ -328,8 +335,7 @@ export default function App() {
           setActiveConvId(latest.id);
           setEntries(latest.entries.filter(e => !e.loading));
         } else {
-          const newId = genId();
-          await invoke('create_conversation', { title: 'New Chat' });
+          const newId = await invoke<string>('create_conversation', { title: 'New Chat' });
           setActiveConvId(newId);
           setEntries([]);
           await invoke('save_conversation', {
@@ -342,6 +348,12 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to load conversations:', err);
+    } finally {
+      loadConvsRunningRef.current = false;
+      if (loadConvsQueuedRef.current) {
+        loadConvsQueuedRef.current = false;
+        loadConversations();
+      }
     }
   };
 
@@ -389,7 +401,8 @@ export default function App() {
         setActiveConvId(latest.id);
         setEntries(latest.entries.filter(e => !e.loading));
       } else {
-        createConv(false);
+        setActiveConvId('');
+        setEntries([]);
       }
     }
     loadConversations();
