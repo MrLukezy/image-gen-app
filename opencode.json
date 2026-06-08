@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "image-gen": {
+      "type": "remote",
+      "url": "http://localhost:3845/mcp",
+      "enabled": true
+    }
+  }
+}

@@ -159,3 +159,36 @@ export function getCustomPresets(): { label: string; value: string }[] {
 export function saveCustomPresets(presets: { label: string; value: string }[]) {
   setLocal(CUSTOM_PRESETS_KEY, JSON.stringify(presets));
 }
+
+// ──────────────────────────── MCP Config ──────────────────────────────────
+
+export interface McpConfig {
+  providerId: string;
+  defaultSize: string;
+  stylePrefix: string;
+  outputDir: string;
+  autoStart: boolean;
+}
+
+const MCP_CONFIG_KEY = 'image_gen_mcp_config';
+
+export function getMcpConfig(): McpConfig {
+  const raw = getLocal(MCP_CONFIG_KEY);
+  if (raw) {
+    try {
+      const cfg = JSON.parse(raw);
+      return {
+        providerId: cfg.providerId || '',
+        defaultSize: cfg.defaultSize || '1024x1024',
+        stylePrefix: cfg.stylePrefix || '',
+        outputDir: cfg.outputDir || '',
+        autoStart: cfg.autoStart ?? false,
+      };
+    } catch {}
+  }
+  return { providerId: '', defaultSize: '1024x1024', stylePrefix: '', outputDir: '', autoStart: false };
+}
+
+export function saveMcpConfig(config: McpConfig) {
+  setLocal(MCP_CONFIG_KEY, JSON.stringify(config));
+}

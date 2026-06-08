@@ -1,0 +1,37 @@
+{
+  "_comment_remote": "Use this when the MCP HTTP server is deployed at a fixed URL (recommended for open-source users)",
+  "remote_example": {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "image-gen": {
+        "type": "remote",
+        "url": "https://your-mcp-server.example.com/mcp",
+        "enabled": true
+      }
+    }
+  },
+
+  "_comment_local": "Use this for local development",
+  "local_example": {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "image-gen": {
+        "type": "local",
+        "command": ["npx", "tsx", "D:/lukezy/image-gen-app/scripts/mcp-server.ts"],
+        "enabled": true
+      }
+    }
+  },
+
+  "_comment_local_http": "Use this to connect to a local HTTP server during development",
+  "local_http_example": {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "image-gen": {
+        "type": "remote",
+        "url": "http://localhost:3845/mcp",
+        "enabled": true
+      }
+    }
+  }
+}

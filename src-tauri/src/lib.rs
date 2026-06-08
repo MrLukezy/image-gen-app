@@ -19,11 +19,14 @@ impl Clone for AppState {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Conversation {
     id: String,
     title: String,
     entries: Vec<ConvEntry>,
+    #[serde(alias = "created_at")]
     created_at: u64,
+    #[serde(alias = "updated_at")]
     updated_at: u64,
 }
 
@@ -1074,6 +1077,99 @@ async fn download_url_bytes(url: &str) -> Option<Vec<u8>> {
         .map(|b| b.to_vec())
 }
 
+// ──────────────────────────── MCP Conversation Commands ─────────────────
+
+fn mcp_conv_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app_data_dir(app).map(|p| p.join("mcp_conversations"))
+}
+
+#[allow(dead_code)]
+fn load_mcp_conversation(app: &tauri::AppHandle, session_id: &str) -> Option<Conversation> {
+    let path = mcp_conv_dir(app)?.join(session_id).join("meta.json");
+    let json = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn load_all_mcp_conversations(app: &tauri::AppHandle) -> Vec<Conversation> {
+    let base = match mcp_conv_dir(app) {
+        Some(p) => p,
+        None => return vec![],
+    };
+    if !base.exists() {
+        return vec![];
+    }
+    let entries = match fs::read_dir(&base) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let dir = e.path();
+            let meta_path = dir.join("meta.json");
+            let json = fs::read_to_string(&meta_path).ok()?;
+            serde_json::from_str::<Conversation>(&json).ok()
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn list_mcp_conversations(app: tauri::AppHandle) -> Vec<Conversation> {
+    load_all_mcp_conversations(&app)
+}
+
+#[tauri::command]
+fn get_mcp_config_file(app: tauri::AppHandle) -> serde_json::Value {
+    let path = match app_data_dir(&app) {
+        Some(p) => p.join("mcp_config.json"),
+        None => return serde_json::json!({}),
+    };
+    match fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    }
+}
+
+#[tauri::command]
+fn save_mcp_config_file(
+    app: tauri::AppHandle,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    let path = match app_data_dir(&app) {
+        Some(p) => p.join("mcp_config.json"),
+        None => return Err("Cannot determine app data dir".to_string()),
+    };
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_mcp_conversation(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    let dir = match mcp_conv_dir(&app) {
+        Some(p) => p.join(&session_id),
+        None => return Err("Cannot determine MCP dir".to_string()),
+    };
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_mcp_server_url() -> Result<String, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    socket.connect("8.8.8.8:80").map_err(|e| e.to_string())?;
+    let local_ip = socket.local_addr().map_err(|e| e.to_string())?.ip().to_string();
+    drop(socket);
+    Ok(format!("http://{}:3845/mcp", local_ip))
+}
+
 // ──────────────────────────── Main ────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1126,6 +1222,11 @@ pub fn run() {
             window_close,
             window_minimize,
             window_maximize,
+            list_mcp_conversations,
+            get_mcp_config_file,
+            save_mcp_config_file,
+            delete_mcp_conversation,
+            get_mcp_server_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -62,3 +62,12 @@ export interface TrashItem {
   updatedAt: number;
   movedAt: number;
 }
+
+export interface McpConversation {
+  id: string;
+  title: string;
+  entries: ConvEntry[];
+  createdAt: number;
+  updatedAt: number;
+  source?: string;
+}

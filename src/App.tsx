@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation, TrashItem, BatchTask } from './types';
+import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import {
   getAppConfig, saveAppConfig,
@@ -8,8 +8,10 @@ import {
   getCurrConvId, setCurrConvId,
   getCustomPresets, saveCustomPresets,
   getProviders, saveProviders, getActiveProviderId, saveActiveProviderId,
+  getMcpConfig, saveMcpConfig,
   PROVIDER_PRESETS,
   type Provider,
+  type McpConfig,
 } from './store';
 import './styles/App.css';
 import LocalImage from './LocalImage';
@@ -182,6 +184,9 @@ export default function App() {
   const [showAddCustomPreset, setShowAddCustomPreset] = useState(false);
   const [newPresetLabel, setNewPresetLabel] = useState('');
   const [newPresetValue, setNewPresetValue] = useState('');
+  const [showMcpGuide, setShowMcpGuide] = useState(false);
+  const [mcpRemoteUrl, setMcpRemoteUrl] = useState('http://localhost:3845/mcp');
+  const [copiedCmdIdx, setCopiedCmdIdx] = useState<number>(-1);
   const [showProviderForm, setShowProviderForm] = useState(false);
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [providerFormPreset, setProviderFormPreset] = useState('custom');
@@ -191,6 +196,11 @@ export default function App() {
   const [parallelCount, setParallelCount] = useState(1);
   const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
+  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp'>('normal');
+  const [mcpConversations, setMcpConversations] = useState<McpConversation[]>([]);
+  const [activeMcpSessionId, setActiveMcpSessionId] = useState<string | null>(null);
+  const [mcpConfig, setMcpConfigState] = useState<McpConfig>(() => getMcpConfig());
+  const mcpPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -344,6 +354,25 @@ export default function App() {
   }, [apiUrl, apiKey, model, activeProviderId]);
 
   useEffect(() => {
+    const activeProv = providers.find(p => p.id === mcpConfig.providerId);
+    const cfgToSave: Record<string, unknown> = {
+      providerId: mcpConfig.providerId,
+      defaultSize: mcpConfig.defaultSize,
+      stylePrefix: mcpConfig.stylePrefix,
+      outputDir: mcpConfig.outputDir,
+    };
+    if (activeProv) {
+      cfgToSave.apiKey = activeProv.apiKey;
+      cfgToSave.apiUrl = activeProv.baseUrl;
+    } else {
+      cfgToSave.apiKey = apiKey;
+      cfgToSave.apiUrl = apiUrl;
+    }
+    cfgToSave.model = model;
+    invoke('save_mcp_config_file', { config: cfgToSave }).catch(() => {});
+  }, [providers, model, apiKey, apiUrl, mcpConfig]);
+
+  useEffect(() => {
     const handleBeforeUnload = () => {
       if (batchSaveTimerRef.current) {
         clearTimeout(batchSaveTimerRef.current);
@@ -357,7 +386,10 @@ export default function App() {
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      if (mcpPollRef.current) clearInterval(mcpPollRef.current);
+    };
   }, []);
 
   const loadConversations = async () => {
@@ -518,6 +550,94 @@ export default function App() {
   const closeTrashView = () => {
     setShowTrash(false);
     loadConversations();
+  };
+
+  const loadMcpConversations = async () => {
+    try {
+      const all = await invoke<McpConversation[]>('list_mcp_conversations');
+      setMcpConversations(prev => {
+        if (prev.length !== all.length) return all;
+        for (let i = 0; i < prev.length; i++) {
+          if (prev[i]!.id !== all[i]!.id || prev[i]!.updatedAt !== all[i]!.updatedAt) return all;
+        }
+        return prev;
+      });
+    } catch {
+      setMcpConversations([]);
+    }
+  };
+
+  const switchSidebarCategory = (cat: 'normal' | 'mcp') => {
+    if (cat === sidebarCategory) return;
+    if (mcpPollRef.current) {
+      clearInterval(mcpPollRef.current);
+      mcpPollRef.current = null;
+    }
+    setSidebarCategory(cat);
+    if (cat === 'mcp') {
+      loadMcpConversations();
+      mcpPollRef.current = setInterval(loadMcpConversations, 800);
+    } else {
+      setActiveMcpSessionId(null);
+      loadConversations();
+    }
+  };
+
+  const deleteMcpSession = async (sessionId: string) => {
+    try {
+      await invoke('delete_mcp_conversation', { sessionId });
+      if (activeMcpSessionId === sessionId) setActiveMcpSessionId(null);
+      loadMcpConversations();
+    } catch {}
+  };
+
+  const updateMcpConfig = (updates: Partial<McpConfig>) => {
+    const updated = { ...mcpConfig, ...updates };
+    setMcpConfigState(updated);
+    saveMcpConfig(updated);
+    const activeProv = providers.find(p => p.id === updated.providerId);
+    const cfgToSave: Record<string, unknown> = {
+      providerId: updated.providerId,
+      defaultSize: updated.defaultSize,
+      stylePrefix: updated.stylePrefix,
+      outputDir: updated.outputDir,
+    };
+    if (activeProv) {
+      cfgToSave.apiKey = activeProv.apiKey;
+      cfgToSave.apiUrl = activeProv.baseUrl;
+    }
+    cfgToSave.model = model;
+    invoke('save_mcp_config_file', { config: cfgToSave }).catch(() => {});
+  };
+
+  const copyToClipboard = (text: string, idx: number) => {
+    const done = () => {
+      setCopiedCmdIdx(idx);
+      setTimeout(() => setCopiedCmdIdx(-1), 1800);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        done();
+      });
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    }
   };
 
   const saveEntries = async (newEntries: ConvEntry[]) => {
@@ -920,7 +1040,20 @@ export default function App() {
       {showSidebar && (
         <aside className="app-sidebar">
           <div className="sidebar-header">
-            <span className="sidebar-title-text">对话列表</span>
+            <div className="sidebar-category-tabs">
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'normal' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('normal')}
+              >
+                对话
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'mcp' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('mcp')}
+              >
+                MCP
+              </button>
+            </div>
             <button
               className="sidebar-close-btn"
               onClick={() => setShowSidebar(false)}
@@ -931,91 +1064,156 @@ export default function App() {
               </svg>
             </button>
           </div>
-          <div className="sidebar-actions">
-            <button className="sidebar-new-btn" onClick={() => createConv(false)} title="在此窗口新建对话">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              新对话
-            </button>
-            <button className="sidebar-new-btn sidebar-new-window-btn" onClick={() => createConv(true)} title="新建独立窗口">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="2" y="3" width="20" height="14" rx="2" />
-                <line x1="8" y1="21" x2="16" y2="21" />
-                <line x1="12" y1="17" x2="12" y2="21" />
-              </svg>
-              新窗口
-            </button>
-          </div>
-          <div className="sidebar-list">
-            {sortedConversations.map(conv => (
-              <div
-                key={conv.id}
-                className={`conv-item ${conv.id === activeConvId ? 'active' : ''}`}
-                onClick={() => switchConv(conv.id)}
-              >
-                {editingConvId === conv.id ? (
-                  <input
-                    className="conv-rename-input"
-                    value={editingTitle}
-                    autoFocus
-                    onChange={e => setEditingTitle(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        renameConv(conv.id, editingTitle);
-                        setEditingConvId(null);
-                      }
-                      if (e.key === 'Escape') setEditingConvId(null);
-                    }}
-                    onBlur={() => { renameConv(conv.id, editingTitle); setEditingConvId(null); }}
-                    onClick={e => e.stopPropagation()}
-                  />
-                ) : (
-                  <div className="conv-item-info">
-                    <div className="conv-item-title">
-                      {conv.title}
-                      {loadingConvs.has(conv.id) && <span className="conv-loading-dot" />}
-                    </div>
-                    <div className="conv-item-preview">
-                      {conv.entries.filter(e => e.type === 'user').length} 条提示词
+          {sidebarCategory === 'normal' ? (
+            <>
+              <div className="sidebar-actions">
+                <button className="sidebar-new-btn" onClick={() => createConv(false)} title="在此窗口新建对话">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  新对话
+                </button>
+              </div>
+              <div className="sidebar-list">
+                {sortedConversations.map(conv => (
+                  <div
+                    key={conv.id}
+                    className={`conv-item ${conv.id === activeConvId ? 'active' : ''}`}
+                    onClick={() => switchConv(conv.id)}
+                  >
+                    {editingConvId === conv.id ? (
+                      <input
+                        className="conv-rename-input"
+                        value={editingTitle}
+                        autoFocus
+                        onChange={e => setEditingTitle(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            renameConv(conv.id, editingTitle);
+                            setEditingConvId(null);
+                          }
+                          if (e.key === 'Escape') setEditingConvId(null);
+                        }}
+                        onBlur={() => { renameConv(conv.id, editingTitle); setEditingConvId(null); }}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div className="conv-item-info">
+                        <div className="conv-item-title">
+                          {conv.title}
+                          {loadingConvs.has(conv.id) && <span className="conv-loading-dot" />}
+                        </div>
+                        <div className="conv-item-preview">
+                          {conv.entries.filter(e => e.type === 'user').length} 条提示词
+                        </div>
+                      </div>
+                    )}
+                    <div className="conv-item-actions">
+                      <button
+                        className="conv-action-btn"
+                        title="重命名"
+                        onClick={e => { e.stopPropagation(); setEditingConvId(conv.id); setEditingTitle(conv.title); }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                        </svg>
+                      </button>
+                      <button
+                        className="conv-action-btn conv-delete-btn"
+                        title="删除"
+                        onClick={e => { e.stopPropagation(); deleteConv(conv.id); }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        </svg>
+                      </button>
                     </div>
                   </div>
-                )}
-                <div className="conv-item-actions">
-                  <button
-                    className="conv-action-btn"
-                    title="重命名"
-                    onClick={e => { e.stopPropagation(); setEditingConvId(conv.id); setEditingTitle(conv.title); }}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                    </svg>
-                  </button>
-                  <button
-                    className="conv-action-btn conv-delete-btn"
-                    title="删除"
-                    onClick={e => { e.stopPropagation(); deleteConv(conv.id); }}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                    </svg>
-                  </button>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <div className="sidebar-footer">
-            <button className={`sidebar-trash-btn ${showTrash ? 'active' : ''}`} onClick={() => showTrash ? closeTrashView() : openTrashView()} title={showTrash ? "关闭回收站" : "回收站"}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6" />
-                <path d="M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-              </svg>
-              回收站
-            </button>
-          </div>
+              <div className="sidebar-footer">
+                <button className={`sidebar-trash-btn ${showTrash ? 'active' : ''}`} onClick={() => showTrash ? closeTrashView() : openTrashView()} title={showTrash ? "关闭回收站" : "回收站"}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
+                    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                  </svg>
+                  回收站
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="sidebar-actions">
+                <button className="sidebar-new-btn" onClick={loadMcpConversations} title="刷新 MCP 会话列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                  </svg>
+                  刷新
+                </button>
+              </div>
+              <div className="sidebar-actions" style={{ borderTop: 'none', paddingTop: 0 }}>
+                <button className="sidebar-new-btn" onClick={() => {
+                  setShowMcpGuide(true);
+                  invoke<string>('get_mcp_server_url').then(url => setMcpRemoteUrl(url)).catch(() => {});
+                }} title="查看 MCP 使用指南">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  MCP 指令
+                </button>
+              </div>
+              <div className="sidebar-list">
+                {mcpConversations.length === 0 ? (
+                  <div className="sidebar-empty-hint">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                    </svg>
+                    <p>暂无 MCP 会话</p>
+                  </div>
+                ) : (
+                  [...mcpConversations]
+                    .sort((a, b) => b.updatedAt - a.updatedAt)
+                    .map(mconv => {
+                      const mImgCount = mconv.entries.reduce((s, e) => s + (e.imageCount || 0), 0);
+                      const mPromptCount = mconv.entries.filter(e => e.type === 'user').length;
+                      const mIsLoading = mconv.entries.some(e => e.loading);
+                      return (
+                        <div
+                          key={mconv.id}
+                          className={`conv-item ${activeMcpSessionId === mconv.id ? 'active' : ''}`}
+                          onClick={() => setActiveMcpSessionId(mconv.id)}
+                        >
+                          <div className="conv-item-info">
+                            <div className="conv-item-title">
+                              {mconv.title}
+                              {mIsLoading && <span className="conv-loading-dot" />}
+                            </div>
+                            <div className="conv-item-preview">
+                              {mPromptCount} 条 · {mImgCount} 张
+                            </div>
+                          </div>
+                          <div className="conv-item-actions">
+                            <button
+                              className="conv-action-btn conv-delete-btn"
+                              title="删除"
+                              onClick={e => { e.stopPropagation(); deleteMcpSession(mconv.id); }}
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                )}
+              </div>
+            </>
+          )}
         </aside>
       )}
 
@@ -1108,6 +1306,199 @@ export default function App() {
                 })}
             </main>
           </div>
+        ) : sidebarCategory === 'mcp' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                  </svg>
+                </div>
+                <h1 className="app-title">MCP 会话</h1>
+                <span className="model-badge">{mcpConversations.length} 个会话</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <main className="mcp-session-detail">
+              {activeMcpSessionId ? (() => {
+                const conv = mcpConversations.find(c => c.id === activeMcpSessionId);
+                if (!conv) {
+                  return <div className="mcp-empty-detail"><p>会话不存在</p></div>;
+                }
+                if (conv.entries.length === 0) {
+                  return <div className="mcp-empty-detail"><p>此会话暂无记录</p></div>;
+                }
+                return conv.entries.map(entry => (
+                  <div key={entry.id} className={`chat-entry ${entry.type}`}>
+                    {entry.type === 'user' ? (
+                      <div className="user-msg">
+                        <div className="msg-avatar">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                          </svg>
+                        </div>
+                        <div className="msg-body">
+                          {entry.refImages && entry.refImages.length > 0 && (
+                            <div className="ref-images-bar">
+                              <span className="ref-images-label">参考图 ({entry.refImages.length})</span>
+                              <div className="ref-images-grid">
+                                {entry.refImages.map((src, i) => (
+                                  <div key={i} className="ref-thumb" onClick={() => setLightboxSrc(src)} title="点击查看原图">
+                                    <LocalImage src={src} alt={`参考图 ${i + 1}`} />
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="msg-text">{entry.prompt}</div>
+                          <div className="msg-meta">
+                            <span className="meta-time">{formatTime(entry.timestamp)}</span>
+                            {entry.size && <span className="meta-size">{entry.size}</span>}
+                            {entry.model && <span className="meta-model">{entry.model}</span>}
+                            <span className="meta-mcp-badge">MCP</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="assistant-msg">
+                        <div className="msg-avatar ai-avatar">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                          </svg>
+                        </div>
+                        <div className="msg-body">
+                          {entry.loading && !entry.batchTotal && (
+                            <div className="loading-container">
+                              <div className="loading-spinner" />
+                              <span className="loading-text">正在生成图片...</span>
+                            </div>
+                          )}
+                          {entry.loading && entry.batchTotal != null && entry.batchTotal > 1 && (
+                            <div className="batch-group-card loading">
+                              <div className="batch-group-header">
+                                <span className="batch-group-count">
+                                  生成中 {entry.batchImages?.filter(t => t.status === 'success').length || 0}/{entry.batchTotal}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                          {entry.error && (
+                            <div className="error-msg">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                              </svg>
+                              {entry.error}
+                            </div>
+                          )}
+                          {!entry.loading && entry.images && entry.images.length > 0 && (
+                            entry.batchTotal != null && entry.batchTotal > 1 ? (
+                              <div className="image-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
+                                {entry.images.map((img, i) => (
+                                  <div key={i} className="image-card">
+                                    <LocalImage
+                                      src={img}
+                                      alt={`生成图片 ${i + 1}`}
+                                      onClick={() => setLightboxSrc(img)}
+                                      style={{ cursor: 'zoom-in' }}
+                                    />
+                                    <div className="image-overlay">
+                                      <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                          <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                        </svg>
+                                      </a>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="image-grid">
+                                {entry.images.map((img, i) => (
+                                  <div key={i} className="image-card">
+                                    <LocalImage
+                                      src={img}
+                                      alt={`生成图片 ${i + 1}`}
+                                      onClick={() => setLightboxSrc(img)}
+                                      style={{ cursor: 'zoom-in' }}
+                                    />
+                                    <div className="image-overlay">
+                                      <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                          <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                        </svg>
+                                      </a>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )
+                          )}
+                          {entry.completedAt && (
+                            <div className="gen-summary">
+                              {entry.duration != null && (
+                                <span className="summary-item">
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                                  </svg>
+                                  {formatDuration(entry.duration)}
+                                </span>
+                              )}
+                              {entry.imageCount != null && entry.imageCount > 0 && (
+                                <span className="summary-item">
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
+                                  {entry.imageCount} 张
+                                </span>
+                              )}
+                              {entry.batchTotal != null && entry.batchTotal > 1 && (
+                                <span className="summary-item batch-summary">
+                                  {entry.batchTotal}并行{entry.batchErrors != null && entry.batchErrors > 0 ? ` ${entry.batchErrors}失败` : ''}
+                                </span>
+                              )}
+                              <span className="summary-item">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" />
+                                </svg>
+                                {formatTime(entry.completedAt)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ));
+              })() : (
+                <div className="mcp-empty-detail">
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                  </svg>
+                  <p>从左侧选择一个 MCP 会话</p>
+                </div>
+              )}
+            </main>
+          </>
         ) : showBatchDetail ? (
           <div className="trash-view">
             <header className="app-header">
@@ -2001,9 +2392,68 @@ export default function App() {
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-                      <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                     </svg>
                   </button>
+                </div>
+              </div>
+
+              <div className="setting-item mcp-settings-section">
+                <label>MCP 服务器配置</label>
+                <div className="mcp-settings-description">
+                  外部 AI 工具通过 MCP 协议调用本工具生成图片。配置用于 MCP 调用的 Provider 和默认参数。
+                </div>
+                <div className="mcp-setting-row">
+                  <label className="mcp-sub-label">MCP Provider</label>
+                  <select
+                    className="model-select"
+                    value={mcpConfig.providerId}
+                    onChange={e => updateMcpConfig({ providerId: e.target.value })}
+                  >
+                    <option value="">跟随当前</option>
+                    {providers.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mcp-setting-row">
+                  <label className="mcp-sub-label">默认尺寸</label>
+                  <select
+                    className="size-select"
+                    value={mcpConfig.defaultSize}
+                    onChange={e => updateMcpConfig({ defaultSize: e.target.value })}
+                  >
+                    {SIZE_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mcp-setting-row">
+                  <label className="mcp-sub-label">风格前缀</label>
+                  <input
+                    type="text"
+                    className="provider-form-input"
+                    value={mcpConfig.stylePrefix}
+                    onChange={e => updateMcpConfig({ stylePrefix: e.target.value })}
+                    placeholder="留空则不添加"
+                  />
+                </div>
+                <div className="mcp-setting-row">
+                  <label className="mcp-sub-label">输出目录</label>
+                  <input
+                    type="text"
+                    className="provider-form-input"
+                    value={mcpConfig.outputDir}
+                    onChange={e => updateMcpConfig({ outputDir: e.target.value })}
+                    placeholder="留空使用默认目录"
+                  />
+                </div>
+                <div className="mcp-startup-hint">
+                  <span className="mcp-sub-label">MCP 启动命令</span>
+                  <code className="mcp-cmd-code" onClick={e => { const range = document.createRange(); range.selectNode(e.currentTarget as Node); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range); }}>
+                    npx tsx {import.meta.url ? '' : ''}scripts/mcp-server.ts
+                  </code>
+                  <span className="mcp-hint-text">在 AI 工具的 MCP 配置中添加上述命令</span>
                 </div>
               </div>
             </div>
@@ -2040,6 +2490,277 @@ export default function App() {
           <div className="preset-preview-arrow" />
         </div>
       )}
+
+      {/* ── MCP Guide Modal ──────────────────────────────────────────── */}
+      {showMcpGuide && (() => {
+        const cc = copyToClipboard;
+        const ci = copiedCmdIdx;
+        const remoteUrl = mcpRemoteUrl;
+
+        const claudeDesktopConfig = `{
+  "mcpServers": {
+    "image-gen": {
+      "type": "streamable-http",
+      "url": "${remoteUrl}"
+    }
+  }
+}`;
+
+        const cursorConfig = `{
+  "mcpServers": {
+    "image-gen": {
+      "type": "streamable-http",
+      "url": "${remoteUrl}"
+    }
+  }
+}`;
+
+        const vscodeConfig = `{
+  "mcp": {
+    "servers": {
+      "image-gen": {
+        "type": "http",
+        "url": "${remoteUrl}"
+      }
+    }
+  }
+}`;
+
+        const openCodeConfig = `{
+  "mcp": {
+    "image-gen": {
+      "type": "remote",
+      "url": "${remoteUrl}",
+      "enabled": true
+    }
+  }
+}`;
+
+        const commands = [
+          {
+            title: '生成单张图片',
+            desc: '使用 AI 工具调用 MCP 生成一张图片。可指定尺寸、风格、参考图等参数。',
+            code: `使用 image-gen MCP 生成一张图片：一张赛博朋克风格的猫咪，尺寸为 1024x1024`,
+          },
+          {
+            title: '并行生成多张图片',
+            desc: '一次性生成多张不同变体图片，适合批量出图、方案对比。',
+            code: `使用 image-gen MCP 并行生成 4 张不同风格的日落风景图，尺寸 1280x720`,
+          },
+          {
+            title: '设置风格前缀',
+            desc: '在后续所有生图调用中自动加上风格前缀，保持一致风格。',
+            code: `使用 image-gen MCP 设置风格为：电影级光影、8K 超清、写实风格`,
+          },
+          {
+            title: '指定输出目录',
+            desc: '将生成的图片保存到指定文件夹，而不是默认的 MCP 会话目录。',
+            code: `使用 image-gen MCP 将后续生成的图片保存到 D:\\projects\\my-art\\output 目录`,
+          },
+          {
+            title: '带参考图生成',
+            desc: '传入参考图进行图生图（最多 6 张）。支持本地文件路径（自动转 base64）、HTTP URL 或 base64 data URI。',
+            code: `使用 image-gen MCP 参考 D:\\\\ref\\\\cat.png 生成同风格但背景为星空的版本`,
+          },
+          {
+            title: '切换模型',
+            desc: '临时切换使用的生图模型（不影响 app 内设置）。',
+            code: `使用 image-gen MCP 切换模型为 gpt-image-1，然后生成一张水墨画风格的山水`,
+          },
+          {
+            title: '查看当前状态',
+            desc: '查询 MCP 服务当前的配置与运行状态。',
+            code: `使用 image-gen MCP 查看当前状态`,
+          },
+          {
+            title: '批量 + 风格组合调用',
+            desc: '先设风格，再批量生成，多步串行的典型工作流。',
+            code: `1. 先用 image-gen MCP 设置风格为：宫崎骏动画风格\n2. 然后用 image-gen MCP 并行生成 6 张不同场景的图片（森林城堡、海边小屋、空中飞船、魔法学院、蒸汽朋克城市、海底王国），尺寸 1024x1024\n3. 最后用 image-gen MCP 查看当前状态`,
+          },
+          {
+            title: '统一会话 ID（推荐）',
+            desc: '在 AI 工具中通过 session_id 参数传入会话标题（即在 MCP 标签页里看到的名称），多次调用同一标题将聚合到同一个会话里，方便集中查看。',
+            code: `使用 image-gen MCP，会话标题设为"我的猫咪系列"，生成一张超现实主义猫咪，尺寸 1024x1024`,
+          },
+          {
+            title: '清空风格 + 重新配置',
+            desc: '清除之前的风格前缀并重新设置。',
+            code: `1. 先用 image-gen MCP 清空风格\n2. 然后用 image-gen MCP 设置风格为：黑白素描、极简线条\n3. 最后生成一张极简风格的猫`,
+          },
+        ];
+
+        const CopyBtn = ({ text, idx, compact = false }: { text: string; idx: number; compact?: boolean }) => (
+          <button className={`mcp-copy-btn ${compact ? 'mcp-copy-btn-compact' : ''}`} onClick={() => cc(text, idx)}>
+            {ci === idx ? '已复制！' : compact ? (
+              <>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                复制
+              </>
+            ) : '复制'}
+          </button>
+        );
+
+        return (
+          <div className="settings-overlay mcp-guide-overlay" onClick={() => setShowMcpGuide(false)}>
+            <div className="mcp-guide-panel" onClick={e => e.stopPropagation()}>
+              <div className="settings-header">
+                <h3>MCP 指令中心</h3>
+                <button className="close-settings" onClick={() => setShowMcpGuide(false)}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="mcp-guide-body">
+                <section className="mcp-guide-section">
+                  <h4>什么是 MCP？</h4>
+                  <p>MCP（Model Context Protocol）是一种让 AI 工具（如 Claude Desktop、Cursor、VS Code Copilot 等）调用外部能力的标准协议。配置好本工具的 MCP 服务后，你可以在这些 AI 工具中直接通过自然语言指令调用本 app 生成图片，所有生图记录会自动归档到本 app 的 MCP 会话列表中。</p>
+                </section>
+
+                <section className="mcp-guide-section">
+                  <h4>使用前提</h4>
+                  <ul className="mcp-guide-list">
+                    <li>确保本工具已启动（MCP HTTP 服务会自动在端口 3845 上运行）</li>
+                    <li>服务器地址已自动检测为本机局域网 IP，下方配置片段可直接复制使用</li>
+                    <li>将下方对应 AI 工具的 JSON 配置片段粘贴到其配置文件中</li>
+                    <li>重启 AI 工具使配置生效</li>
+                  </ul>
+                </section>
+
+                <section className="mcp-guide-section">
+                  <h4>AI 工具配置片段</h4>
+
+                  <div className="mcp-url-config">
+                    <label className="mcp-url-label">服务器地址（已自动检测）</label>
+                    <input
+                      className="mcp-url-input"
+                      type="text"
+                      value={mcpRemoteUrl}
+                      readOnly
+                    />
+                    <button className="mcp-url-redetect" onClick={() => {
+                      invoke<string>('get_mcp_server_url').then(url => setMcpRemoteUrl(url)).catch(() => {});
+                    }} title="重新检测">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                      </svg>
+                    </button>
+                    <CopyBtn text={mcpRemoteUrl} idx={99} compact />
+                  </div>
+
+                  {mcpRemoteUrl.includes('localhost') && (
+                    <div className="mcp-note-card">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                      </svg>
+                      <span>MCP 服务正在本机运行。如需局域网内其他设备访问，确保端口 3845 已放行，地址已自动检测为局域网 IP。</span>
+                    </div>
+                  )}
+
+                  <div className="mcp-config-block">
+                    <div className="mcp-config-head">
+                      <span className="mcp-config-title">Claude Desktop</span>
+                      <CopyBtn text={claudeDesktopConfig} idx={0} />
+                    </div>
+                    <pre className="mcp-code-block">{claudeDesktopConfig}</pre>
+                    <span className="mcp-config-hint">位置：Claude Desktop → Settings → Developer → Edit Config → claude_desktop_config.json</span>
+                  </div>
+
+                  <div className="mcp-config-block">
+                    <div className="mcp-config-head">
+                      <span className="mcp-config-title">Cursor</span>
+                      <CopyBtn text={cursorConfig} idx={1} />
+                    </div>
+                    <pre className="mcp-code-block">{cursorConfig}</pre>
+                    <span className="mcp-config-hint">位置：~/.cursor/mcp.json（全局）或项目 .cursor/mcp.json（项目级）</span>
+                  </div>
+
+                  <div className="mcp-config-block">
+                    <div className="mcp-config-head">
+                      <span className="mcp-config-title">VS Code (Copilot MCP)</span>
+                      <CopyBtn text={vscodeConfig} idx={2} />
+                    </div>
+                    <pre className="mcp-code-block">{vscodeConfig}</pre>
+                    <span className="mcp-config-hint">位置：项目 .vscode/mcp.json 或在用户 settings.json 中添加</span>
+                  </div>
+
+                  <div className="mcp-config-block">
+                    <div className="mcp-config-head">
+                      <span className="mcp-config-title">OpenCode</span>
+                      <CopyBtn text={openCodeConfig} idx={3} />
+                    </div>
+                    <pre className="mcp-code-block">{openCodeConfig}</pre>
+                    <span className="mcp-config-hint">位置：项目 opencode.json 的 "mcp" 字段，或全局 ~/.config/opencode/opencode.json</span>
+                  </div>
+                </section>
+
+                <section className="mcp-guide-section">
+                  <h4>常用指令模板</h4>
+                  <p className="mcp-guide-intro">以下是在 AI 工具中可以直接说的自然语言指令（点击右侧按钮复制整段指令）：</p>
+
+                  <div className="mcp-cmd-list">
+                    {commands.map((cmd, i) => {
+                      const idx = i + 10;
+                      return (
+                        <div key={idx} className="mcp-cmd-card">
+                          <div className="mcp-cmd-head">
+                            <div>
+                              <div className="mcp-cmd-title">{cmd.title}</div>
+                              <div className="mcp-cmd-desc">{cmd.desc}</div>
+                            </div>
+                            <CopyBtn text={cmd.code} idx={idx} compact />
+                          </div>
+                          <pre className="mcp-cmd-code">{cmd.code}</pre>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="mcp-guide-section">
+                  <h4>MCP 暴露的工具（Tools）</h4>
+                  <p className="mcp-guide-intro">AI 工具也可直接调用以下函数名（用于结构化调用而非自然语言）：</p>
+                  <div className="mcp-tools-table">
+                    <div className="mcp-tools-row mcp-tools-header">
+                      <span className="mcp-col-name">Tool 名称</span>
+                      <span className="mcp-col-desc">说明</span>
+                      <span className="mcp-col-params">关键参数</span>
+                    </div>
+                    {[
+                      { name: 'generate_image', desc: '生成单张图片', params: 'prompt, size?, style?, model?, reference_images?, output_dir?, session_id?' },
+                      { name: 'generate_images_parallel', desc: '并行生成多张', params: 'prompt, count, size?, style?, reference_images?, session_id?' },
+                      { name: 'set_style', desc: '设置全局风格前缀', params: 'style' },
+                      { name: 'set_output_dir', desc: '设置输出目录', params: 'output_dir' },
+                      { name: 'set_config', desc: '更新运行时配置', params: 'model?, size?, style?, output_dir?' },
+                      { name: 'get_status', desc: '查看当前状态', params: '无' },
+                    ].map(t => (
+                      <div key={t.name} className="mcp-tools-row">
+                        <span className="mcp-col-name"><code>{t.name}</code></span>
+                        <span className="mcp-col-desc">{t.desc}</span>
+                        <span className="mcp-col-params">{t.params}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="mcp-guide-section">
+                  <h4>提示</h4>
+                  <ul className="mcp-guide-list">
+                    <li>每次调用 MCP 生图后，本 app 内的 MCP 标签页会自动出现对应会话</li>
+                    <li>使用 session_id 参数传入会话"标题"（即 MCP 标签页中看到的名称）可聚合多次调用到同一会话；相同标题 = 同一会话</li>
+                    <li>输出目录留空时使用默认路径：mcp_conversations/&lt;session&gt;/images/</li>
+                    <li>风格前缀是运行时临时状态，重启 MCP 服务后会重置</li>
+                  </ul>
+                </section>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
