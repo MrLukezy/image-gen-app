@@ -21,6 +21,7 @@ interface ConvEntry {
   type: 'user' | 'assistant';
   prompt?: string;
   images?: string[];
+  refImages?: string[];
   error?: string;
   loading?: boolean;
   timestamp: number;
@@ -161,6 +162,7 @@ function saveSession(conv: Conversation): void {
   const dir = mcpSessionDir(conv.id);
   fs.mkdirSync(dir, { recursive: true });
   const metaPath = path.join(dir, 'meta.json');
+  const tmpPath = metaPath + '.tmp';
   const diskObj = {
     id: conv.id,
     title: conv.title,
@@ -169,7 +171,12 @@ function saveSession(conv: Conversation): void {
     updated_at: conv.updatedAt,
     source: conv.source || 'mcp',
   };
-  fs.writeFileSync(metaPath, JSON.stringify(diskObj, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(diskObj, null, 2), 'utf-8');
+    fs.renameSync(tmpPath, metaPath);
+  } catch {
+    fs.writeFileSync(metaPath, JSON.stringify(diskObj, null, 2), 'utf-8');
+  }
 }
 
 function loadAllMcpConversations(): Conversation[] {
@@ -262,7 +269,29 @@ async function callImageApi(
   prompt: string,
   size: string,
   referenceImages?: string[],
+  onKeepalive?: () => void,
 ): Promise<{ images: string[]; error: string | null }> {
+  const apiCallId = `api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  process.stderr.write(`\n${'='.repeat(60)}\n`);
+  process.stderr.write(`[${apiCallId}] callImageApi START\n`);
+  process.stderr.write(`[${apiCallId}] apiUrl: ${apiUrl}\n`);
+  process.stderr.write(`[${apiCallId}] model: ${model}, size: ${size}\n`);
+  process.stderr.write(`[${apiCallId}] prompt: ${prompt.slice(0, 100)}${prompt.length > 100 ? '...' : ''}\n`);
+
+  if (referenceImages && referenceImages.length > 0) {
+    process.stderr.write(`[${apiCallId}] referenceImages count: ${referenceImages.length}\n`);
+    referenceImages.forEach((img, idx) => {
+      const prefix = img.slice(0, 80);
+      const isDataUri = img.startsWith('data:');
+      const isUrl = img.startsWith('http://') || img.startsWith('https://');
+      const hasComma = img.includes(',');
+      process.stderr.write(`[${apiCallId}]   [${idx + 1}] type=${isDataUri ? 'dataURI' : isUrl ? 'URL' : 'rawBase64'}, len=${img.length}, hasComma=${hasComma}\n`);
+      process.stderr.write(`[${apiCallId}]   [${idx + 1}] preview: ${prefix}${img.length > 80 ? '...' : ''}\n`);
+    });
+  } else {
+    process.stderr.write(`[${apiCallId}] referenceImages: none\n`);
+  }
+
   const payload = JSON.stringify({
     model,
     prompt,
@@ -272,7 +301,41 @@ async function callImageApi(
     response_format: 'b64_json',
   });
 
+  process.stderr.write(`[${apiCallId}] payload size: ${payload.length} bytes\n`);
+
+  // Dump a debug report (not the full base64) to file
+  const debugDir = path.join(homedir(), '.opencode', 'image-gen-debug');
+  try {
+    fs.mkdirSync(debugDir, { recursive: true });
+    const debugReport = {
+      timestamp: new Date().toISOString(),
+      apiCallId,
+      apiUrl,
+      model,
+      size,
+      promptLen: prompt.length,
+      hasRefImages: !!(referenceImages && referenceImages.length > 0),
+      refImageCount: referenceImages?.length || 0,
+      refImageSummary: referenceImages?.map((img, i) => ({
+        idx: i + 1,
+        len: img.length,
+        type: img.startsWith('http') ? 'URL' : img.startsWith('data:') ? 'dataURI' : 'rawBase64',
+        first50: img.slice(0, 50),
+        last30: img.slice(-30),
+        hasComma: img.includes(','),
+      })) || [],
+    };
+    fs.writeFileSync(
+      path.join(debugDir, `req_${apiCallId}.json`),
+      JSON.stringify(debugReport, null, 2),
+    );
+    process.stderr.write(`[${apiCallId}] debug report written to: ${path.join(debugDir, `req_${apiCallId}.json`)}\n`);
+  } catch (e: any) {
+    process.stderr.write(`[${apiCallId}] failed to write debug report: ${e.message}\n`);
+  }
+
   const url = new URL(apiUrl);
+  const bodyBytes = Buffer.byteLength(payload, 'utf-8');
   const options = {
     protocol: url.protocol,
     hostname: url.hostname,
@@ -282,15 +345,31 @@ async function callImageApi(
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
+      'Content-Length': bodyBytes,
     },
   };
 
   try {
     const resp = await httpRequest(options, payload);
+    process.stderr.write(`[${apiCallId}] response status: ${resp.status}\n`);
+
     if (resp.status !== 200) {
-      return { images: [], error: `HTTP ${resp.status}: ${resp.body.slice(0, 500)}` };
+      process.stderr.write(`[${apiCallId}] ERROR response body: ${resp.body.slice(0, 1000)}\n`);
+      let errMsg = `HTTP ${resp.status}: ${resp.body.slice(0, 500)}`;
+      if (referenceImages && referenceImages.length > 0 && resp.status === 400) {
+        errMsg += `\n[ref_images debug]`
+          + referenceImages.map((r, i) => {
+            const first4bytes = Buffer.from(r.slice(0, 10), 'utf-8').toString('hex');
+            const fmt = r.startsWith('http') ? 'URL' : r.startsWith('data:') ? 'dataURI' : r.length > 1000 ? `rawB64(len=${r.length})` : `short(len=${r.length})`;
+            return `\n  #${i + 1}: format=${fmt} first40="${r.slice(0, 40)}" hex[0:10]=${first4bytes}`;
+          }).join('');
+      }
+      process.stderr.write(`[${apiCallId}] returning error: ${errMsg}\n`);
+      process.stderr.write(`${'='.repeat(60)}\n\n`);
+      return { images: [], error: errMsg };
     }
 
+    process.stderr.write(`[${apiCallId}] response size: ${resp.body.length} bytes\n`);
     const genResp = JSON.parse(resp.body);
 
     if (genResp.status === 'FAILED' || genResp.status === 'ERROR') {
@@ -317,6 +396,7 @@ async function callImageApi(
       const pollUrl = new URL(`${apiUrl.replace(/\/generations$/, '')}/${genResp.task_id}`);
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 5000));
+        onKeepalive?.();
         const pollOpts = {
           protocol: pollUrl.protocol,
           hostname: pollUrl.hostname,
@@ -371,58 +451,198 @@ async function saveImageToLocal(
   if (imageData.startsWith('data:')) {
     const b64 = imageData.split(',')[1] || imageData;
     fs.writeFileSync(fpath, Buffer.from(b64, 'base64'));
-  } else if (imageData.startsWith('http')) {
-    const url = new URL(imageData);
-    const lib = url.protocol === 'http:' ? http : https;
-    await new Promise<void>((resolve, reject) => {
-      lib.get(imageData, (res: any) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => {
-          fs.writeFileSync(fpath, Buffer.concat(chunks));
-          resolve();
-        });
-        res.on('error', reject);
-      }).on('error', reject);
-    });
-  } else {
-    fs.writeFileSync(fpath, Buffer.from(imageData, 'base64'));
+    return fpath;
   }
 
-  return fpath;
+  if (imageData.startsWith('http')) {
+    const MAX_RETRIES = 3;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const url = new URL(imageData);
+          const lib = url.protocol === 'http:' ? http : https;
+          lib.get(imageData, { timeout: 30000 }, (res: any) => {
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+              // follow redirect
+              const newUrl = new URL(res.headers.location, imageData).toString();
+              const lib2 = newUrl.startsWith('https') ? https : http;
+              lib2.get(newUrl, { timeout: 30000 }, (res2: any) => {
+                const chunks: Buffer[] = [];
+                res2.on('data', (chunk: Buffer) => chunks.push(chunk));
+                res2.on('end', () => {
+                  if (chunks.length === 0) return reject(new Error('Empty response after redirect'));
+                  fs.writeFileSync(fpath, Buffer.concat(chunks));
+                  resolve();
+                });
+                res2.on('error', reject);
+              }).on('error', reject);
+              return;
+            }
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => {
+              if (chunks.length === 0) return reject(new Error('Empty image data'));
+              fs.writeFileSync(fpath, Buffer.concat(chunks));
+              resolve();
+            });
+            res.on('error', reject);
+          }).on('error', reject);
+        });
+        return fpath;
+      } catch (e: any) {
+        process.stderr.write(`[saveImageToLocal] URL download attempt ${attempt + 1}/${MAX_RETRIES} failed: ${e.message}\n`);
+        if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+    // all retries failed - save URL to a .txt so we have a traceable record, but return the URL as fallback
+    try { fs.writeFileSync(fpath.replace(/\.png$/, '.url.txt'), imageData); } catch {}
+    process.stderr.write(`[saveImageToLocal] All retries failed, returning URL: ${imageData.slice(0, 100)}\n`);
+    return imageData;
+  }
+
+  // raw base64
+  try {
+    fs.writeFileSync(fpath, Buffer.from(imageData, 'base64'));
+    return fpath;
+  } catch {
+    return imageData;
+  }
+}
+
+async function saveRefImagesToLocal(
+  rawRefImages: string[],
+  sessionId: string,
+  entryId: string,
+  outputDir?: string,
+): Promise<string[]> {
+  const saved: string[] = [];
+  const dir = outputDir || path.join(mcpSessionDir(sessionId), 'images');
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < rawRefImages.length; i++) {
+    const img = rawRefImages[i];
+    const fname = `${entryId}_ref_${i}.png`;
+    const fpath = path.join(dir, fname);
+    try {
+      if (img.startsWith('data:')) {
+        const b64 = img.split(',')[1];
+        if (b64) {
+          fs.writeFileSync(fpath, Buffer.from(b64, 'base64'));
+          saved.push(fpath);
+        }
+      } else if (img.startsWith('http://') || img.startsWith('https://')) {
+        saved.push(img);
+      } else if (fs.existsSync(img) && fs.statSync(img).isFile()) {
+        fs.copyFileSync(img, fpath);
+        saved.push(fpath);
+      } else {
+        saved.push(img);
+      }
+    } catch {
+      saved.push(img);
+    }
+  }
+  return saved;
+}
+
+function detectMimeFromExt(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase().slice(1);
+  switch (ext) {
+    case 'png': return 'image/png';
+    case 'jpg': case 'jpeg': return 'image/jpeg';
+    case 'webp': return 'image/webp';
+    case 'gif': return 'image/gif';
+    case 'bmp': return 'image/bmp';
+    default: return 'image/png';
+  }
+}
+
+function diagnoseBase64(label: string, value: string): void {
+  const len = value.length;
+  const first100 = value.slice(0, 100);
+  const last50 = value.slice(-50);
+  const b64Regex = /^[A-Za-z0-9+/=]+$/;
+  let validB64Region = '';
+  for (const region of [first100, value.slice(0, 20), value.slice(len / 2, len / 2 + 20), last50]) {
+    if (!b64Regex.test(region)) {
+      for (let i = 0; i < region.length; i++) {
+        const ch = region.charCodeAt(i);
+        if (!/[A-Za-z0-9+/=]/.test(region[i])) {
+          process.stderr.write(`${label} INVALID CHAR at offset ${i}: '${region[i]}' (U+${ch.toString(16).padStart(4, '0')})\n`);
+          break;
+        }
+      }
+    }
+  }
+  process.stderr.write(`${label} len=${len}, first80: ${first100.slice(0, 80)}\n`);
+  process.stderr.write(`${label} last30:  ${last50.slice(-30)}\n`);
+
+  const dataUriMatch = value.match(/^data:([^;]+);base64,(.*)$/);
+  if (dataUriMatch) {
+    const mime = dataUriMatch[1];
+    const rawB64 = dataUriMatch[2];
+    process.stderr.write(`${label} dataURI mime=${mime}, rawB64 len=${rawB64.length}\n`);
+    const b64Valid = b64Regex.test(rawB64.slice(0, 200));
+    process.stderr.write(`${label} first200 of raw b64 valid=${b64Valid}\n`);
+  } else if (b64Regex.test(value.slice(0, 200))) {
+    process.stderr.write(`${label} looks like raw b64\n`);
+  } else if (value.startsWith('http')) {
+    process.stderr.write(`${label} is URL\n`);
+  } else {
+    process.stderr.write(`${label} UNKNOWN FORMAT\n`);
+  }
 }
 
 async function prepareReferenceImages(images: string[]): Promise<string[]> {
   const prepared: string[] = [];
-  for (const img of images) {
-    if (img.startsWith('data:') || img.startsWith('http://') || img.startsWith('https://')) {
-      prepared.push(img);
-    } else if (fs.existsSync(img) && fs.statSync(img).isFile()) {
-      try {
-        const bytes = fs.readFileSync(img);
-        const ext = path.extname(img).toLowerCase().slice(1) || 'png';
-        const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
-                   : ext === 'webp' ? 'image/webp'
-                   : ext === 'gif' ? 'image/gif'
-                   : 'image/png';
-        const b64 = Buffer.from(bytes).toString('base64');
-        prepared.push(`${mime};base64,${b64}`);
-      } catch {
-        prepared.push(img);
-      }
-    } else if (/^[A-Za-z0-9+/=]{20,}$/.test(img)) {
-      prepared.push(`data:image/png;base64,${img}`);
+  const b64Re = /^[A-Za-z0-9+/]+(=*)$/;
+  process.stderr.write(`\n[prepareRef] ── ENTER: got ${images.length} image(s) ──\n`);
+  for (let idx = 0; idx < images.length; idx++) {
+    const img = images[idx];
+    if (!img || typeof img !== 'string') {
+      process.stderr.write(`[prepareRef] [${idx + 1}] SKIP: not a string (type=${typeof img})\n`);
+      continue;
+    }
+
+    let value = img.trim();
+    process.stderr.write(`[prepareRef] [${idx + 1}] INPUT: len=${value.length}, starts='${value.slice(0, 60)}'\n`);
+
+    if (value.startsWith('data:')) {
+      prepared.push(value);
+      process.stderr.write(`[prepareRef] [${idx + 1}] OUTPUT: data URI passthrough (len=${value.length})\n`);
+    } else if (value.startsWith('http://') || value.startsWith('https://')) {
+      process.stderr.write(`[prepareRef] [${idx + 1}] OUTPUT: URL passthrough\n`);
+      prepared.push(value);
+    } else if (value.length >= 100 && b64Re.test(value.slice(0, 100))) {
+      // Looks like raw base64 (long string of b64 chars, not a file path) — wrap as data URI
+      const dataUri = `data:image/png;base64,${value}`;
+      process.stderr.write(`[prepareRef] [${idx + 1}] OUTPUT: raw base64 wrapped as data URI (len=${value.length})\n`);
+      prepared.push(dataUri);
     } else {
-      try {
-        const bytes = fs.readFileSync(img);
-        const b64 = Buffer.from(bytes).toString('base64');
-        prepared.push(`data:image/png;base64,${b64}`);
-      } catch {
-        prepared.push(img);
+      let resolvedPath = value;
+      if (!fs.existsSync(value) || !fs.statSync(value).isFile()) {
+        const normalized = value.replace(/\\\\/g, '\\').replace(/\//g, path.sep);
+        if (fs.existsSync(normalized) && fs.statSync(normalized).isFile()) {
+          resolvedPath = normalized;
+        } else {
+          throw new Error(`Reference image #${idx + 1}: file not found: ${value.slice(0, 200)}`);
+        }
       }
+
+      const bytes = fs.readFileSync(resolvedPath);
+      if (bytes.length === 0) {
+        throw new Error(`Reference image #${idx + 1}: file is empty: ${resolvedPath}`);
+      }
+      const b64 = bytes.toString('base64');
+      if (!b64) throw new Error(`Reference image #${idx + 1}: base64 encoding failed`);
+      const mime = detectMimeFromExt(resolvedPath);
+      const dataUri = `data:${mime};base64,${b64}`;
+      process.stderr.write(`[prepareRef] [${idx + 1}] FROM FILE: ${path.basename(resolvedPath)} ${bytes.length}B → data URI (len=${dataUri.length})\n`);
+      prepared.push(dataUri);
     }
   }
+
   const total = prepared.reduce((s, p) => s + p.length, 0);
+  process.stderr.write(`[prepareRef] ── EXIT: ${prepared.length} prepared, total chars=${total} ──\n\n`);
   if (total > 50_000_000) {
     throw new Error(`Reference images total size ${(total / 1024 / 1024).toFixed(1)}MB exceeds limit (max 50MB).`);
   }
@@ -435,7 +655,155 @@ let currentOutputDir = '';
 let currentSize = '1024x1024';
 let currentModel = '';
 
-async function handleGenerateImage(args: any): Promise<any> {
+// ──────────────────────────── Background Jobs ────────────────────────────
+
+interface Job {
+  jobId: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  total: number;
+  completed: number;
+  errors: number;
+  startTime: number;
+  endTime?: number;
+  sessionId: string;
+  entryId: string;
+  images: string[];
+  cancelled: boolean;
+}
+
+const activeJobs = new Map<string, Job>();
+
+function cleanupOldJobs() {
+  const cutoff = nowMs() - 30 * 60 * 1000;
+  for (const [id, job] of activeJobs) {
+    if (job.endTime && job.endTime < cutoff) activeJobs.delete(id);
+  }
+}
+
+function getJob(jobId: string): Job | null {
+  return activeJobs.get(jobId) || null;
+}
+
+function listAllJobs(): Job[] {
+  cleanupOldJobs();
+  return [...activeJobs.values()].sort((a, b) => b.startTime - a.startTime).slice(0, 50);
+}
+
+function cancelJob(jobId: string): boolean {
+  const job = activeJobs.get(jobId);
+  if (!job || job.status !== 'running') return false;
+  job.cancelled = true;
+  return true;
+}
+
+async function handleRunParallelJob(
+  jobId: string,
+  cfg: McpConfig,
+  enrichedPrompt: string,
+  model: string,
+  size: string,
+  apiRefImages: string[] | undefined,
+  count: number,
+  sessionId: string,
+  assistantId: string,
+  outputDir: string,
+  sendNotification?: SendNotification,
+): Promise<void> {
+  const job = activeJobs.get(jobId)!;
+  const batchImages: BatchTask[] = [];
+  const allImages: string[] = [];
+  let errorCount = 0;
+
+  const KEEPALIVE_MS = 3000;
+  const kaTimer = setInterval(() => {
+    const elapsed = Math.round((nowMs() - job.startTime) / 1000);
+    sendNotification?.('notifications/message', {
+      level: 'info', logger: 'image-gen',
+      data: `[keepalive][${jobId}] Background job: ${job.completed}/${job.total} done (${elapsed}s)`,
+    });
+  }, KEEPALIVE_MS);
+
+  const apiKeepalive = sendNotification
+    ? () => {
+        const elapsed = Math.round((nowMs() - job.startTime) / 1000);
+        sendNotification('notifications/message', {
+          level: 'info', logger: 'image-gen',
+          data: `[keepalive][${jobId}] API polling... ${job.completed}/${job.total} (${elapsed}s)`,
+        });
+      }
+    : undefined;
+
+  try {
+    const BATCH_SIZE = 5;
+    for (let bs = 0; bs < count; bs += BATCH_SIZE) {
+      if (job.cancelled) break;
+      const be = Math.min(bs + BATCH_SIZE, count);
+      const promises: Promise<void>[] = [];
+      for (let i = bs; i < be; i++) {
+        const idx = i;
+        promises.push((async () => {
+          if (job.cancelled) return;
+          const result = await callImageApi(cfg.apiUrl, cfg.apiKey, model, enrichedPrompt, size, apiRefImages, apiKeepalive);
+          if (result.images.length > 0) {
+            try {
+              const lp = await saveImageToLocal(result.images[0], sessionId, assistantId, idx, outputDir || undefined);
+              batchImages[idx] = { id: idx, status: 'success', image: lp };
+              allImages[idx] = lp;
+            } catch {
+              batchImages[idx] = { id: idx, status: 'success', image: result.images[0] };
+              allImages[idx] = result.images[0];
+            }
+          } else {
+            batchImages[idx] = { id: idx, status: 'failed', error: result.error || 'Unknown error' };
+            errorCount++;
+          }
+          job.completed = batchImages.filter(b => b && (b.status === 'success' || b.status === 'failed')).length;
+          job.errors = errorCount;
+          job.images = allImages.filter(Boolean) as string[];
+          if (sendNotification) {
+            sendNotification('notifications/message', {
+              level: 'info', logger: 'image-gen',
+              data: `[${jobId}] Progress: ${job.completed}/${count}, ${errorCount} errors`,
+            });
+          }
+        })());
+      }
+      await Promise.allSettled(promises);
+    }
+  } finally {
+    clearInterval(kaTimer);
+    job.status = job.cancelled ? 'cancelled' : 'completed';
+    job.endTime = nowMs();
+    const successCount = allImages.filter(Boolean).length;
+    job.images = allImages.filter(Boolean) as string[];
+    job.errors = errorCount;
+
+    const finalEntry: ConvEntry = {
+      id: assistantId, type: 'assistant', loading: false,
+      images: allImages.filter(Boolean),
+      error: successCount === 0 ? `All ${errorCount} tasks failed` : undefined,
+      timestamp: nowMs(), size, model,
+      duration: job.endTime - job.startTime, completedAt: job.endTime,
+      imageCount: successCount,
+      batchId: jobId, batchTotal: count, batchImages, batchErrors: errorCount,
+    };
+    try {
+      const conv = getOrCreateSession(sessionId);
+      const ei = conv.entries.findIndex(e => e.id === assistantId);
+      if (ei >= 0) conv.entries[ei] = finalEntry; else conv.entries.push(finalEntry);
+      conv.updatedAt = nowMs();
+      saveSession(conv);
+    } catch {}
+    if (sendNotification) {
+      sendNotification('notifications/message', {
+        level: 'info', logger: 'image-gen',
+        data: `[${jobId}] Done: ${successCount}/${count} OK (${((job.endTime - job.startTime) / 1000).toFixed(1)}s)`,
+      });
+    }
+  }
+}
+
+async function handleGenerateImage(args: any, progressToken?: string | number, sendNotification?: SendNotification): Promise<any> {
   const cfg = loadProviderConfig(args.provider_id);
   if (!cfg.apiKey) {
     return { content: [{ type: 'text', text: 'Error: No API key configured. Please configure the MCP provider in the AI Image Generator app.' }] };
@@ -448,6 +816,18 @@ async function handleGenerateImage(args: any): Promise<any> {
   const outputDir = args.output_dir || currentOutputDir || cfg.outputDir;
   const rawRefImages = args.reference_images || undefined;
   const model = args.model || currentModel || cfg.model;
+
+  process.stderr.write(`\n[handleGenerateImage] ── ENTER ──\n`);
+  process.stderr.write(`[handleGenerateImage] prompt: "${prompt.slice(0, 80)}"\n`);
+  process.stderr.write(`[handleGenerateImage] model: ${model}, size: ${size}\n`);
+  if (rawRefImages && rawRefImages.length > 0) {
+    process.stderr.write(`[handleGenerateImage] RAW reference_images from client: ${rawRefImages.length} item(s)\n`);
+    rawRefImages.forEach((img: string, i: number) => {
+      process.stderr.write(`[handleGenerateImage]   #${i + 1}: type=${typeof img}, len=${img?.length}, preview="${(img || '').slice(0, 80)}"\n`);
+    });
+  } else {
+    process.stderr.write(`[handleGenerateImage] reference_images: none\n`);
+  }
 
   let enrichedPrompt = prompt;
   if (stylePrefix) {
@@ -463,13 +843,22 @@ async function handleGenerateImage(args: any): Promise<any> {
     }
   }
 
+  const userEntryId = genId();
+  const preSession = getOrCreateSession(nameOrId);
+  const sessionId = preSession.id;
+
+  const savedRefImages = rawRefImages && rawRefImages.length > 0
+    ? await saveRefImagesToLocal(rawRefImages, sessionId, userEntryId, outputDir || undefined).catch(() => rawRefImages)
+    : undefined;
+
   const userEntry: ConvEntry = {
-    id: genId(),
+    id: userEntryId,
     type: 'user',
     prompt,
     timestamp: nowMs(),
     size,
     model,
+    refImages: savedRefImages,
   };
 
   const assistantId = genId();
@@ -483,10 +872,44 @@ async function handleGenerateImage(args: any): Promise<any> {
   };
 
   const initialConv = appendEntriesToSession(nameOrId, [userEntry, loadingEntry]);
-  const sessionId = initialConv.id;
 
   const startTime = nowMs();
-  const result = await callImageApi(cfg.apiUrl, cfg.apiKey, model, enrichedPrompt, size, apiRefImages);
+  if (progressToken != null && sendNotification) {
+    sendNotification('notifications/progress', { progressToken, progress: 0, total: 3, message: 'Preparing image generation...' });
+    sendNotification('notifications/message', { level: 'info', logger: 'image-gen', data: `Starting single image generation: ${enrichedPrompt.slice(0, 80)}` });
+  }
+
+  const KEEPALIVE_INTERVAL_MS = 3000;
+  const keepaliveStart = nowMs();
+  const keepaliveTimer = (sendNotification && progressToken != null)
+    ? setInterval(() => {
+        const elapsed = Math.round((nowMs() - keepaliveStart) / 1000);
+        sendNotification('notifications/message', {
+          level: 'info',
+          logger: 'image-gen',
+          data: `[keepalive] Still generating image... (${elapsed}s elapsed)`,
+        });
+      }, KEEPALIVE_INTERVAL_MS)
+    : null;
+
+  const apiKeepalive = sendNotification
+    ? () => {
+        const elapsed = Math.round((nowMs() - keepaliveStart) / 1000);
+        sendNotification('notifications/message', {
+          level: 'info',
+          logger: 'image-gen',
+          data: `[keepalive] Waiting for API result... (${elapsed}s elapsed)`,
+        });
+      }
+    : undefined;
+
+  const result = await callImageApi(cfg.apiUrl, cfg.apiKey, model, enrichedPrompt, size, apiRefImages, apiKeepalive);
+
+  if (keepaliveTimer) clearInterval(keepaliveTimer);
+
+  if (progressToken != null && sendNotification) {
+    sendNotification('notifications/progress', { progressToken, progress: 2, total: 3, message: 'Saving image...' });
+  }
   const endTime = nowMs();
 
   let savedImages: string[] = [];
@@ -537,7 +960,7 @@ async function handleGenerateImage(args: any): Promise<any> {
   };
 }
 
-async function handleParallelGenerate(args: any): Promise<any> {
+async function handleParallelGenerate(args: any, progressToken?: string | number, sendNotification?: SendNotification): Promise<any> {
   const cfg = loadProviderConfig(args.provider_id);
   if (!cfg.apiKey) {
     return { content: [{ type: 'text', text: 'Error: No API key configured.' }] };
@@ -551,6 +974,17 @@ async function handleParallelGenerate(args: any): Promise<any> {
   const outputDir = args.output_dir || currentOutputDir || cfg.outputDir;
   const rawRefImages = args.reference_images || undefined;
   const model = args.model || currentModel || cfg.model;
+
+  process.stderr.write(`\n[handleParallelGenerate] ── ENTER ──\n`);
+  process.stderr.write(`[handleParallelGenerate] count: ${count}, prompt: "${prompt.slice(0, 80)}"\n`);
+  if (rawRefImages && rawRefImages.length > 0) {
+    process.stderr.write(`[handleParallelGenerate] RAW reference_images from client: ${rawRefImages.length} item(s)\n`);
+    rawRefImages.forEach((img: string, i: number) => {
+      process.stderr.write(`[handleParallelGenerate]   #${i + 1}: type=${typeof img}, len=${img?.length}, preview="${(img || '').slice(0, 80)}"\n`);
+    });
+  } else {
+    process.stderr.write(`[handleParallelGenerate] reference_images: none\n`);
+  }
 
   let enrichedPrompt = prompt;
   if (stylePrefix) {
@@ -566,13 +1000,22 @@ async function handleParallelGenerate(args: any): Promise<any> {
     }
   }
 
+  const userEntryId = genId();
+  const preSession = getOrCreateSession(nameOrId);
+  const sessionId = preSession.id;
+
+  const savedRefImages = rawRefImages && rawRefImages.length > 0
+    ? await saveRefImagesToLocal(rawRefImages, sessionId, userEntryId, outputDir || undefined).catch(() => rawRefImages)
+    : undefined;
+
   const userEntry: ConvEntry = {
-    id: genId(),
+    id: userEntryId,
     type: 'user',
     prompt: `${prompt} (${count} parallel)`,
     timestamp: nowMs(),
     size,
     model,
+    refImages: savedRefImages,
   };
 
   const batchId = genId();
@@ -594,12 +1037,101 @@ async function handleParallelGenerate(args: any): Promise<any> {
   };
 
   const initialConv = appendEntriesToSession(nameOrId, [userEntry, loadingEntry]);
-  const sessionId = initialConv.id;
+
+  const isBackground = args.background === true || args.background === 'true';
+
+  if (isBackground) {
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    activeJobs.set(jobId, {
+      jobId,
+      status: 'running',
+      total: count,
+      completed: 0,
+      errors: 0,
+      startTime: nowMs(),
+      sessionId,
+      entryId: assistantId,
+      images: [],
+      cancelled: false,
+    });
+    handleRunParallelJob(jobId, cfg, enrichedPrompt, model, size, apiRefImages, count, sessionId, assistantId, outputDir, sendNotification).catch(() => {});
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `Generation started in background.`,
+          `Job ID: ${jobId}`,
+          `Session ID: ${sessionId}`,
+          `Tasks: ${count} images`,
+          ``,
+          `Use 'get_job_status' tool to check progress (pass job_id: "${jobId}").`,
+          `Images will be saved to session and visible in the MCP session panel.`,
+        ].join('\n'),
+      }],
+    };
+  }
 
   const startTime = nowMs();
   const allImages: string[] = [];
   const batchImages: BatchTask[] = [];
   let errorCount = 0;
+  let completedCount = 0;
+
+  const notifyProgress = () => {
+    if (sendNotification) {
+      if (progressToken != null) {
+        sendNotification('notifications/progress', {
+          progressToken,
+          progress: completedCount,
+          total: count,
+          message: `Generated ${completedCount}/${count} images${errorCount > 0 ? ` (${errorCount} failed)` : ''}`,
+        });
+      }
+      sendNotification('notifications/message', {
+        level: 'info',
+        logger: 'image-gen',
+        data: `Progress: ${completedCount}/${count} completed, ${errorCount} errors`,
+      });
+    }
+  };
+
+  if (sendNotification) {
+    if (progressToken != null) {
+      sendNotification('notifications/progress', { progressToken, progress: 0, total: count, message: `Starting ${count} parallel image generation...` });
+    }
+    sendNotification('notifications/message', { level: 'info', logger: 'image-gen', data: `Starting parallel generation: ${count} images, prompt: ${enrichedPrompt.slice(0, 80)}` });
+  }
+
+  const KEEPALIVE_INTERVAL_MS = 3000;
+  const keepaliveTimer = sendNotification
+    ? setInterval(() => {
+        const elapsed = Math.round((nowMs() - startTime) / 1000);
+        if (progressToken != null) {
+          sendNotification('notifications/progress', {
+            progressToken,
+            progress: completedCount,
+            total: count,
+            message: `[keepalive] ${completedCount}/${count} done (${elapsed}s elapsed)${errorCount > 0 ? `, ${errorCount} errors` : ''}`,
+          });
+        }
+        sendNotification('notifications/message', {
+          level: 'info',
+          logger: 'image-gen',
+          data: `[keepalive] Still generating: ${completedCount}/${count} done, ${elapsed}s elapsed`,
+        });
+      }, KEEPALIVE_INTERVAL_MS)
+    : null;
+
+  const apiKeepalive = sendNotification
+    ? () => {
+        const elapsed = Math.round((nowMs() - startTime) / 1000);
+        sendNotification('notifications/message', {
+          level: 'info',
+          logger: 'image-gen',
+          data: `[keepalive] API polling... ${completedCount}/${count} done, ${elapsed}s elapsed`,
+        });
+      }
+    : undefined;
 
   const updateProgress = () => {
     try {
@@ -615,6 +1147,7 @@ async function handleParallelGenerate(args: any): Promise<any> {
         saveSession(conv);
       }
     } catch {}
+    notifyProgress();
   };
 
   const BATCH_SIZE = 5;
@@ -624,7 +1157,7 @@ async function handleParallelGenerate(args: any): Promise<any> {
     for (let i = batchStart; i < batchEnd; i++) {
       const idx = i;
       promises.push((async () => {
-        const result = await callImageApi(cfg.apiUrl, cfg.apiKey, model, enrichedPrompt, size, apiRefImages);
+        const result = await callImageApi(cfg.apiUrl, cfg.apiKey, model, enrichedPrompt, size, apiRefImages, apiKeepalive);
         if (result.images.length > 0) {
           try {
             const localPath = await saveImageToLocal(result.images[0], sessionId, assistantId, idx, outputDir || undefined);
@@ -638,11 +1171,21 @@ async function handleParallelGenerate(args: any): Promise<any> {
           batchImages[idx] = { id: idx, status: 'failed', error: result.error || 'Unknown error' };
           errorCount++;
         }
+        completedCount++;
         updateProgress();
       })());
     }
     await Promise.allSettled(promises);
     updateProgress();
+  }
+
+  if (keepaliveTimer) clearInterval(keepaliveTimer);
+
+  if (sendNotification) {
+    if (progressToken != null) {
+      sendNotification('notifications/progress', { progressToken, progress: count, total: count, message: `Complete: ${count - errorCount}/${count} succeeded` });
+    }
+    sendNotification('notifications/message', { level: 'info', logger: 'image-gen', data: `Parallel generation complete: ${count - errorCount}/${count} succeeded in ${((nowMs() - startTime) / 1000).toFixed(1)}s` });
   }
 
   const endTime = nowMs();
@@ -713,6 +1256,8 @@ function handleGetStatus(): any {
   const cfg = loadMcpConfig();
   const hasConfig = !!cfg.apiKey;
   const all = loadAllMcpConversations();
+  cleanupOldJobs();
+  const runningJobs = [...activeJobs.values()].filter(j => j.status === 'running');
   return {
     content: [
       {
@@ -727,6 +1272,13 @@ function handleGetStatus(): any {
           outputDir: currentOutputDir || cfg.outputDir || '(default session dir)',
           defaultSessionId,
           existingSessions: all.map(c => ({ id: c.id, title: c.title, entries: c.entries.length })),
+          activeJobs: runningJobs.map(j => ({
+            jobId: j.jobId,
+            status: j.status,
+            progress: `${j.completed}/${j.total}`,
+            errors: j.errors,
+            elapsed: `${Math.round((nowMs() - j.startTime) / 1000)}s`,
+          })),
         }, null, 2),
       },
     ],
@@ -740,6 +1292,68 @@ function handleSetConfig(args: any): any {
   if (args.output_dir !== undefined) currentOutputDir = args.output_dir;
   return {
     content: [{ type: 'text', text: `Config updated. model=${currentModel || '(default)'}, size=${currentSize}, style=${currentStyle || '(none)'}, outputDir=${currentOutputDir || '(default)'}` }],
+  };
+}
+
+function handleListJobs(): any {
+  const jobs = listAllJobs();
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        jobs: jobs.map(j => ({
+          jobId: j.jobId,
+          status: j.status,
+          progress: `${j.completed}/${j.total}`,
+          errors: j.errors,
+          elapsed: j.endTime ? `${((j.endTime - j.startTime) / 1000).toFixed(1)}s` : `${Math.round((nowMs() - j.startTime) / 1000)}s`,
+          sessionId: j.sessionId,
+          imageCount: j.images.length,
+        })),
+        total: jobs.length,
+      }, null, 2),
+    }],
+  };
+}
+
+function handleGetJobStatus(args: any): any {
+  const jobId = args.job_id;
+  if (!jobId) {
+    return { content: [{ type: 'text', text: 'Error: job_id is required.' }] };
+  }
+  const job = getJob(jobId);
+  if (!job) {
+    return { content: [{ type: 'text', text: `Job not found: ${jobId}. Use list_jobs to see all jobs.` }] };
+  }
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        jobId: job.jobId,
+        status: job.status,
+        progress: `${job.completed}/${job.total}`,
+        errors: job.errors,
+        cancelled: job.cancelled,
+        startTime: new Date(job.startTime).toISOString(),
+        endTime: job.endTime ? new Date(job.endTime).toISOString() : null,
+        elapsed: job.endTime
+          ? `${((job.endTime - job.startTime) / 1000).toFixed(1)}s`
+          : `${Math.round((nowMs() - job.startTime) / 1000)}s`,
+        sessionId: job.sessionId,
+        images: job.images,
+      }, null, 2),
+    }],
+  };
+}
+
+function handleCancelJob(args: any): any {
+  const jobId = args.job_id;
+  if (!jobId) {
+    return { content: [{ type: 'text', text: 'Error: job_id is required.' }] };
+  }
+  const ok = cancelJob(jobId);
+  return {
+    content: [{ type: 'text', text: ok ? `Job ${jobId} cancelled.` : `Job ${jobId} not found or not running.` }],
   };
 }
 
@@ -764,7 +1378,7 @@ export const TOOLS = [
   },
   {
     name: 'generate_images_parallel',
-    description: 'Generate multiple images in parallel from the same prompt.',
+    description: 'Generate multiple images in parallel from the same prompt. IMPORTANT: For count >= 3, always use background:true to avoid timeout. Returns immediately with jobId; poll progress with get_job_status tool.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -777,6 +1391,7 @@ export const TOOLS = [
         output_dir: { type: 'string', description: 'Directory to save images' },
         session_id: { type: 'string', description: 'Session identifier' },
         provider_id: { type: 'string', description: 'Provider ID' },
+        background: { type: 'boolean', description: 'If true, start generation in background and return immediately with a jobId. Use get_job_status to poll.' },
       },
       required: ['prompt'],
     },
@@ -821,9 +1436,38 @@ export const TOOLS = [
     description: 'Get current MCP server configuration and status.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'list_jobs',
+    description: 'List all active and recent background image generation jobs.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_job_status',
+    description: 'Get the status of a specific background job. Returns progress, elapsed time, and image paths if completed. Poll every 5-10 seconds until status is completed/cancelled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job ID returned by generate_images_parallel with background:true' },
+      },
+      required: ['job_id'],
+    },
+  },
+  {
+    name: 'cancel_job',
+    description: 'Cancel a running background image generation job.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job ID to cancel' },
+      },
+      required: ['job_id'],
+    },
+  },
 ];
 
-export async function handleJsonRpc(msg: any): Promise<any> {
+export type SendNotification = (method: string, params?: any) => void;
+
+export async function handleJsonRpc(msg: any, sendNotification?: SendNotification): Promise<any> {
   const { id, method, params } = msg;
 
   if (method === 'initialize') {
@@ -835,7 +1479,7 @@ export async function handleJsonRpc(msg: any): Promise<any> {
         capabilities: { tools: {} },
         serverInfo: {
           name: 'image-gen-mcp',
-          version: '1.0.0',
+          version: '1.1.0',
         },
       },
     };
@@ -852,15 +1496,16 @@ export async function handleJsonRpc(msg: any): Promise<any> {
   if (method === 'tools/call') {
     const toolName = params?.name;
     const args = params?.arguments || {};
+    const progressToken = params?._meta?.progressToken;
 
     try {
       let result: any;
       switch (toolName) {
         case 'generate_image':
-          result = await handleGenerateImage(args);
+          result = await handleGenerateImage(args, progressToken, sendNotification);
           break;
         case 'generate_images_parallel':
-          result = await handleParallelGenerate(args);
+          result = await handleParallelGenerate(args, progressToken, sendNotification);
           break;
         case 'set_style':
           result = handleSetStyle(args);
@@ -873,6 +1518,15 @@ export async function handleJsonRpc(msg: any): Promise<any> {
           break;
         case 'get_status':
           result = handleGetStatus();
+          break;
+        case 'list_jobs':
+          result = handleListJobs();
+          break;
+        case 'get_job_status':
+          result = handleGetJobStatus(args);
+          break;
+        case 'cancel_job':
+          result = handleCancelJob(args);
           break;
         default:
           return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${toolName}` } };

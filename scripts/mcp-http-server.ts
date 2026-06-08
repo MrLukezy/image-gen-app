@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { handleJsonRpc } from './mcp-handlers.js';
+import { handleJsonRpc, type SendNotification } from './mcp-handlers.js';
 
 const PORT = parseInt(process.env.MCP_PORT || '3845', 10);
 const MCP_PATH = process.env.MCP_PATH || '/mcp';
@@ -16,7 +16,13 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf-8');
+      if (body.includes('reference_images') || body.length > 10000) {
+        process.stderr.write(`[http-server] Large/special body received: ${body.length} bytes, has reference_images=${body.includes('reference_images')}\n`);
+      }
+      resolve(body);
+    });
     req.on('error', reject);
   });
 }
@@ -54,17 +60,21 @@ async function handlePost(req: http.IncomingMessage, res: http.ServerResponse): 
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
+    const sseNotificationSender: SendNotification = (method: string, params?: any) => {
+      broadcastNotification(method, params);
+    };
+
     if (Array.isArray(msg)) {
       const results = [];
       for (const m of msg) {
-        const r = await handleJsonRpc(m);
+        const r = await handleJsonRpc(m, sseNotificationSender);
         if (r) results.push(r);
       }
       sendJson(res, 200, results);
       return;
     }
 
-    const result = await handleJsonRpc(msg);
+    const result = await handleJsonRpc(msg, sseNotificationSender);
 
     if (!result) {
       res.writeHead(202, CORS_HEADERS);

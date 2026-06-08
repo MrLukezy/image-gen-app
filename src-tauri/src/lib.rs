@@ -21,12 +21,15 @@ impl Clone for AppState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Conversation {
+    #[serde(default)]
     id: String,
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     entries: Vec<ConvEntry>,
-    #[serde(alias = "created_at")]
+    #[serde(default, alias = "created_at")]
     created_at: u64,
-    #[serde(alias = "updated_at")]
+    #[serde(default, alias = "updated_at")]
     updated_at: u64,
 }
 
@@ -49,7 +52,9 @@ struct TrashItem {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct BatchTaskEntry {
+    #[serde(default)]
     id: u32,
+    #[serde(default)]
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     image: Option<String>,
@@ -60,8 +65,9 @@ struct BatchTaskEntry {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ConvEntry {
+    #[serde(default)]
     id: String,
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
     entry_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
@@ -73,6 +79,7 @@ struct ConvEntry {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     loading: Option<bool>,
+    #[serde(default)]
     timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<String>,
@@ -244,8 +251,21 @@ fn trash_dir(app: &tauri::AppHandle, conv_id: &str) -> Option<PathBuf> {
 
 fn load_conversation(app: &tauri::AppHandle, conv_id: &str) -> Option<Conversation> {
     let path = conv_dir(app, conv_id)?.join("meta.json");
+    if !path.exists() { return None; }
     let json = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    match serde_json::from_str(&json) {
+        Ok(c) => Some(c),
+        Err(err) => {
+            eprintln!("[conv] Failed to parse {}: {}", conv_id, err);
+            Some(Conversation {
+                id: conv_id.to_string(),
+                title: format!("[加载失败] {}", conv_id),
+                entries: vec![],
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+    }
 }
 
 fn load_all_conversations(app: &tauri::AppHandle) -> Vec<Conversation> {
@@ -1085,9 +1105,23 @@ fn mcp_conv_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 #[allow(dead_code)]
 fn load_mcp_conversation(app: &tauri::AppHandle, session_id: &str) -> Option<Conversation> {
-    let path = mcp_conv_dir(app)?.join(session_id).join("meta.json");
+    let base = mcp_conv_dir(app)?;
+    let path = base.join(session_id).join("meta.json");
+    if !path.exists() { return None; }
     let json = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    match serde_json::from_str(&json) {
+        Ok(c) => Some(c),
+        Err(err) => {
+            eprintln!("[mcp] Failed to parse session {}: {}", session_id, err);
+            Some(Conversation {
+                id: session_id.to_string(),
+                title: format!("[加载失败] {}", session_id),
+                entries: vec![],
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+    }
 }
 
 fn load_all_mcp_conversations(app: &tauri::AppHandle) -> Vec<Conversation> {
@@ -1102,16 +1136,31 @@ fn load_all_mcp_conversations(app: &tauri::AppHandle) -> Vec<Conversation> {
         Ok(e) => e,
         Err(_) => return vec![],
     };
-    entries
+    let mut convs: Vec<Conversation> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {
             let dir = e.path();
+            let dir_name = e.file_name().to_string_lossy().to_string();
             let meta_path = dir.join("meta.json");
             let json = fs::read_to_string(&meta_path).ok()?;
-            serde_json::from_str::<Conversation>(&json).ok()
+            match serde_json::from_str::<Conversation>(&json) {
+                Ok(c) => Some(c),
+                Err(err) => {
+                    eprintln!("[mcp] Failed to parse {}: {}", dir_name, err);
+                    Some(Conversation {
+                        id: dir_name.clone(),
+                        title: format!("[加载失败] {}", dir_name),
+                        entries: vec![],
+                        created_at: 0,
+                        updated_at: 0,
+                    })
+                }
+            }
         })
-        .collect()
+        .collect();
+    convs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    convs
 }
 
 #[tauri::command]

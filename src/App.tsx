@@ -185,6 +185,7 @@ export default function App() {
   const [newPresetLabel, setNewPresetLabel] = useState('');
   const [newPresetValue, setNewPresetValue] = useState('');
   const [showMcpGuide, setShowMcpGuide] = useState(false);
+  const [mcpBatchDetailEntryId, setMcpBatchDetailEntryId] = useState<string | null>(null);
   const [mcpRemoteUrl, setMcpRemoteUrl] = useState('http://localhost:3845/mcp');
   const [copiedCmdIdx, setCopiedCmdIdx] = useState<number>(-1);
   const [showProviderForm, setShowProviderForm] = useState(false);
@@ -556,14 +557,15 @@ export default function App() {
     try {
       const all = await invoke<McpConversation[]>('list_mcp_conversations');
       setMcpConversations(prev => {
-        if (prev.length !== all.length) return all;
+        const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
+        if (prev.length !== sorted.length) return sorted;
         for (let i = 0; i < prev.length; i++) {
-          if (prev[i]!.id !== all[i]!.id || prev[i]!.updatedAt !== all[i]!.updatedAt) return all;
+          if (prev[i]!.id !== sorted[i]!.id || prev[i]!.updatedAt !== sorted[i]!.updatedAt) return sorted;
         }
         return prev;
       });
     } catch {
-      setMcpConversations([]);
+      // keep existing state on transient IPC error
     }
   };
 
@@ -579,6 +581,7 @@ export default function App() {
       mcpPollRef.current = setInterval(loadMcpConversations, 800);
     } else {
       setActiveMcpSessionId(null);
+      setMcpBatchDetailEntryId(null);
       loadConversations();
     }
   };
@@ -1185,7 +1188,7 @@ export default function App() {
                         <div
                           key={mconv.id}
                           className={`conv-item ${activeMcpSessionId === mconv.id ? 'active' : ''}`}
-                          onClick={() => setActiveMcpSessionId(mconv.id)}
+                          onClick={() => { setActiveMcpSessionId(mconv.id); setMcpBatchDetailEntryId(null); }}
                         >
                           <div className="conv-item-info">
                             <div className="conv-item-title">
@@ -1348,6 +1351,96 @@ export default function App() {
                 if (conv.entries.length === 0) {
                   return <div className="mcp-empty-detail"><p>此会话暂无记录</p></div>;
                 }
+                if (mcpBatchDetailEntryId) {
+                  const batchEntry = conv.entries.find(e => e.id === mcpBatchDetailEntryId);
+                  if (batchEntry) {
+                    const tasks = batchEntry.batchImages || [];
+                    const successTasks = tasks.filter(t => t.status === 'success');
+                    const failedTasks = tasks.filter(t => t.status === 'failed');
+                    const loadingTasks = tasks.filter(t => t.status === 'loading');
+                    const total = batchEntry.batchTotal || 0;
+                    const progress = successTasks.length + failedTasks.length;
+                    const progressPct = total > 0 ? (progress / total) * 100 : 0;
+                    return (
+                      <>
+                        <div className="batch-detail-header">
+                          <button className="header-icon-btn" onClick={() => setMcpBatchDetailEntryId(null)} title="返回会话">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
+                            </svg>
+                          </button>
+                          <h2 className="batch-detail-title">生成结果</h2>
+                          <span className="model-badge">{successTasks.length}/{total} 成功</span>
+                          {failedTasks.length > 0 && <span className="model-badge" style={{ color: 'var(--error)' }}>{failedTasks.length} 失败</span>}
+                          {loadingTasks.length > 0 && <span className="model-badge" style={{ color: 'var(--text-secondary)' }}>{loadingTasks.length} 进行中</span>}
+                        </div>
+                        <div className="batch-detail-stats">
+                          <div className="batch-detail-stat">
+                            <span className="stat-number">{total}</span>
+                            <span className="stat-label">总任务</span>
+                          </div>
+                          <div className="batch-detail-stat success">
+                            <span className="stat-number">{successTasks.length}</span>
+                            <span className="stat-label">成功</span>
+                          </div>
+                          <div className="batch-detail-stat failed">
+                            <span className="stat-number">{failedTasks.length}</span>
+                            <span className="stat-label">失败</span>
+                          </div>
+                          <div className="batch-detail-stat loading-stat">
+                            <span className="stat-number">{loadingTasks.length}</span>
+                            <span className="stat-label">进行中</span>
+                          </div>
+                        </div>
+                        {loadingTasks.length > 0 && (
+                          <div className="batch-detail-progress">
+                            <div className="batch-loading-bar">
+                              <div className="batch-loading-fill" style={{ width: `${progressPct}%` }} />
+                            </div>
+                            <span className="batch-progress-text">{Math.round(progressPct)}%</span>
+                          </div>
+                        )}
+                        <div className="batch-detail-grid">
+                          {tasks.map((task, i) => (
+                            <div key={i} className={`batch-detail-card ${task.status}`}>
+                              {task.status === 'loading' && (
+                                <div className="batch-detail-placeholder">
+                                  <div className="loading-spinner" />
+                                  <span>生成中 #{i + 1}</span>
+                                </div>
+                              )}
+                              {task.status === 'success' && task.image && (
+                                <>
+                                  <div className="batch-detail-img" onClick={() => setLightboxSrc(task.image!)}>
+                                    <LocalImage src={task.image} alt={`图片 #${i + 1}`} style={{ cursor: 'zoom-in' }} />
+                                  </div>
+                                  <div className="batch-detail-overlay-actions">
+                                    <a href={task.image} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                        <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                      </svg>
+                                    </a>
+                                  </div>
+                                </>
+                              )}
+                              {task.status === 'failed' && (
+                                <div className="batch-detail-placeholder batch-detail-error">
+                                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                                  </svg>
+                                  <span>#{i + 1}</span>
+                                  <span className="batch-detail-err-reason" title={task.error}>{task.error?.slice(0, 40) || '失败'}</span>
+                                </div>
+                              )}
+                              <div className="batch-detail-index">#{i + 1}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  }
+                }
                 return conv.entries.map(entry => (
                   <div key={entry.id} className={`chat-entry ${entry.type}`}>
                     {entry.type === 'user' ? (
@@ -1393,16 +1486,74 @@ export default function App() {
                               <span className="loading-text">正在生成图片...</span>
                             </div>
                           )}
-                          {entry.loading && entry.batchTotal != null && entry.batchTotal > 1 && (
-                            <div className="batch-group-card loading">
-                              <div className="batch-group-header">
-                                <span className="batch-group-count">
-                                  生成中 {entry.batchImages?.filter(t => t.status === 'success').length || 0}/{entry.batchTotal}
-                                </span>
+                          {(() => {
+                            const isBatch = entry.batchTotal != null && entry.batchTotal > 1;
+                            const isLoadingBatch = entry.loading && isBatch;
+                            const doneBatch = !entry.loading && isBatch;
+                            if (!isLoadingBatch && !doneBatch) return null;
+                            const tasks = entry.batchImages || [];
+                            const successTasks = tasks.filter(t => t.status === 'success');
+                            const failedTasks = tasks.filter(t => t.status === 'failed');
+                            const loadingTasks = tasks.filter(t => t.status === 'loading');
+                            const total = entry.batchTotal || 1;
+                            const progressPct = total > 0 ? ((successTasks.length + failedTasks.length) / total) * 100 : 0;
+                            const allSuccess = loadingTasks.length === 0 && failedTasks.length === 0 && successTasks.length > 0;
+                            return (
+                              <div className={`batch-group-card ${entry.loading ? 'loading' : ''}`} onClick={() => setMcpBatchDetailEntryId(entry.id)}>
+                                <div className="batch-group-header">
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+                                    <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+                                  </svg>
+                                  {entry.loading ? (
+                                    <span className="batch-group-count">
+                                      生成中 {successTasks.length}/{total}
+                                      {failedTasks.length > 0 && <span className="batch-group-errors-inline">{failedTasks.length}失败</span>}
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <span className="batch-group-count">{successTasks.length} 张图片</span>
+                                      {entry.batchErrors != null && entry.batchErrors > 0 && (
+                                        <span className="batch-group-errors">{entry.batchErrors} 失败</span>
+                                      )}
+                                      {allSuccess && <span className="batch-group-success">全部成功</span>}
+                                    </>
+                                  )}
+                                  <span className="batch-group-hint">点击查看详情</span>
+                                </div>
+                                {entry.loading && (
+                                  <div className="batch-loading-bar">
+                                    <div className="batch-loading-fill" style={{ width: `${progressPct}%` }} />
+                                  </div>
+                                )}
+                                <div className="batch-group-grid">
+                                  {tasks.filter(t => t.status === 'success').map((t, i) => (
+                                    <div key={`s${i}`} className="batch-group-thumb">
+                                      <LocalImage src={t.image!} alt={`图 ${i + 1}`} />
+                                    </div>
+                                  ))}
+                                  {tasks.filter(t => t.status === 'loading').slice(0, 6).map((t, i) => (
+                                    <div key={`l${i}`} className="batch-group-thumb loading-thumb">
+                                      <div className="loading-spinner" />
+                                      <div className="batch-group-task-id">#{t.id + 1}</div>
+                                    </div>
+                                  ))}
+                                  {tasks.filter(t => t.status === 'failed').map((t, i) => (
+                                    <div key={`f${i}`} className="batch-group-thumb failed-thumb">
+                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                                      </svg>
+                                      <div className="batch-group-task-id">#{t.id + 1}</div>
+                                    </div>
+                                  ))}
+                                  {tasks.filter(t => t.status === 'loading').length > 6 && (
+                                    <div className="batch-group-more">+{tasks.filter(t => t.status === 'loading').length - 6} 排队中</div>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                          {entry.error && (
+                            );
+                          })()}
+                          {entry.error && !entry.batchTotal && (
                             <div className="error-msg">
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                 <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
@@ -1410,50 +1561,27 @@ export default function App() {
                               {entry.error}
                             </div>
                           )}
-                          {!entry.loading && entry.images && entry.images.length > 0 && (
-                            entry.batchTotal != null && entry.batchTotal > 1 ? (
-                              <div className="image-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
-                                {entry.images.map((img, i) => (
-                                  <div key={i} className="image-card">
-                                    <LocalImage
-                                      src={img}
-                                      alt={`生成图片 ${i + 1}`}
-                                      onClick={() => setLightboxSrc(img)}
-                                      style={{ cursor: 'zoom-in' }}
-                                    />
-                                    <div className="image-overlay">
-                                      <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                                          <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
-                                        </svg>
-                                      </a>
-                                    </div>
+                          {!entry.loading && (!entry.batchTotal || entry.batchTotal <= 1) && entry.images && entry.images.length > 0 && (
+                            <div className="image-grid">
+                              {entry.images.map((img, i) => (
+                                <div key={i} className="image-card">
+                                  <LocalImage
+                                    src={img}
+                                    alt={`生成图片 ${i + 1}`}
+                                    onClick={() => setLightboxSrc(img)}
+                                    style={{ cursor: 'zoom-in' }}
+                                  />
+                                  <div className="image-overlay">
+                                    <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                        <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                      </svg>
+                                    </a>
                                   </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="image-grid">
-                                {entry.images.map((img, i) => (
-                                  <div key={i} className="image-card">
-                                    <LocalImage
-                                      src={img}
-                                      alt={`生成图片 ${i + 1}`}
-                                      onClick={() => setLightboxSrc(img)}
-                                      style={{ cursor: 'zoom-in' }}
-                                    />
-                                    <div className="image-overlay">
-                                      <a href={img} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                                          <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
-                                        </svg>
-                                      </a>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )
+                                </div>
+                              ))}
+                            </div>
                           )}
                           {entry.completedAt && (
                             <div className="gen-summary">

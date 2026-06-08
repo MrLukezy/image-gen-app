@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { handleJsonRpc } from './mcp-handlers.js';
+import { handleJsonRpc, type SendNotification } from './mcp-handlers.js';
 
 let buffer = Buffer.alloc(0);
 
@@ -9,6 +9,10 @@ function sendMessage(msg: any): void {
   const header = `Content-Length: ${content.length}\r\n\r\n`;
   process.stdout.write(header + json);
 }
+
+const sendNotification: SendNotification = (method: string, params?: any) => {
+  sendMessage({ jsonrpc: '2.0', method, params });
+};
 
 function processData(): void {
   while (true) {
@@ -27,7 +31,7 @@ function processData(): void {
     buffer = buffer.slice(totalLen);
     try {
       const msg = JSON.parse(body);
-      handleJsonRpc(msg).then(result => {
+      handleJsonRpc(msg, sendNotification).then(result => {
         if (result) sendMessage(result);
       }).catch(e => {
         process.stderr.write(`[mcp-server] Error: ${e.message}\n`);
