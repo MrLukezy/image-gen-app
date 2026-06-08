@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation } from './types';
+import type { ConvEntry, Conversation, TrashItem } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import {
   getAppConfig, saveAppConfig,
@@ -12,6 +12,7 @@ import {
   type Provider,
 } from './store';
 import './styles/App.css';
+import LocalImage from './LocalImage';
 
 const SIZE_OPTIONS = [
   { label: '1:1', value: '1024x1024' },
@@ -132,6 +133,8 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState('');
   const [validationError, setValidationError] = useState('');
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
   const [showPresets, setShowPresets] = useState(false);
   const [selectedPresets, setSelectedPresets] = useState<Set<string>>(new Set());
   const [activeCategory, setActiveCategory] = useState('style');
@@ -389,6 +392,34 @@ export default function App() {
         createConv(false);
       }
     }
+    loadConversations();
+  };
+
+  const loadTrash = async () => {
+    try {
+      const items = await invoke<TrashItem[]>('list_trash');
+      setTrashItems(items);
+    } catch { /* ignore */ }
+  };
+
+  const restoreFromTrash = async (id: string) => {
+    await invoke('restore_trash', { conversationId: id });
+    loadTrash();
+    loadConversations();
+  };
+
+  const permanentDelete = async (id: string) => {
+    await invoke('permanent_delete_trash', { conversationId: id });
+    loadTrash();
+  };
+
+  const openTrashView = () => {
+    setShowTrash(true);
+    loadTrash();
+  };
+
+  const closeTrashView = () => {
+    setShowTrash(false);
     loadConversations();
   };
 
@@ -715,11 +746,98 @@ export default function App() {
               </div>
             ))}
           </div>
+          <div className="sidebar-footer">
+            <button className={`sidebar-trash-btn ${showTrash ? 'active' : ''}`} onClick={() => showTrash ? closeTrashView() : openTrashView()} title={showTrash ? "关闭回收站" : "回收站"}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+              回收站
+            </button>
+          </div>
         </aside>
       )}
 
       {/* ── Main Panel ───────────────────────────────────────────────── */}
       <div className="main-panel">
+        {showTrash ? (
+          <div className="trash-view">
+            <header className="app-header">
+              <div className="header-left">
+                <button className="header-icon-btn" onClick={closeTrashView} title="返回对话">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
+                  </svg>
+                </button>
+                <h1 className="app-title">回收站</h1>
+                <span className="model-badge">{trashItems.length} 项</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <main className="trash-list">
+              {trashItems.length === 0 && (
+                <div className="welcome">
+                  <div className="welcome-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                    </svg>
+                  </div>
+                  <h2>回收站为空</h2>
+                  <p>删除的会话将在此处保留 7 天</p>
+                </div>
+              )}
+              {trashItems
+                .sort((a, b) => b.movedAt - a.movedAt)
+                .map(item => {
+                  const movedDate = new Date(item.movedAt);
+                  const now = Date.now();
+                  const daysLeft = Math.max(0, Math.ceil((7 * 24 * 60 * 60 * 1000 - (now - item.movedAt)) / (24 * 60 * 60 * 1000)));
+                  return (
+                    <div key={item.id} className="trash-item">
+                      <div className="trash-item-info">
+                        <div className="trash-item-title">{item.title}</div>
+                        <div className="trash-item-meta">
+                          <span>{item.imageCount} 张图片</span>
+                          <span>删除于 {movedDate.toLocaleDateString('zh-CN')} {movedDate.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                          <span className="trash-item-expire">{daysLeft > 0 ? `${daysLeft} 天后自动清理` : '即将清理'}</span>
+                        </div>
+                      </div>
+                      <div className="trash-item-actions">
+                        <button className="trash-action-btn restore-btn" onClick={() => restoreFromTrash(item.id)} title="恢复">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 105.64-11.36L1 10" />
+                          </svg>
+                          恢复
+                        </button>
+                        <button className="trash-action-btn delete-btn" onClick={() => permanentDelete(item.id)} title="彻底删除">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" />
+                          </svg>
+                          彻底删除
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </main>
+          </div>
+        ) : (
+          <>
         {/* Header */}
         <header className="app-header">
           <div className="header-left">
@@ -819,7 +937,7 @@ export default function App() {
                         <div className="ref-images-grid">
                           {entry.refImages.map((src, i) => (
                             <div key={i} className="ref-thumb" onClick={() => setLightboxSrc(src)} title="点击查看原图">
-                              <img src={src} alt={`参考图 ${i + 1}`} />
+                              <LocalImage src={src} alt={`参考图 ${i + 1}`} />
                             </div>
                           ))}
                         </div>
@@ -859,10 +977,9 @@ export default function App() {
                       <div className="image-grid">
                         {entry.images.map((img, i) => (
                           <div key={i} className="image-card">
-                            <img
+                            <LocalImage
                               src={img}
                               alt={`生成图片 ${i + 1}`}
-                              loading="lazy"
                               onClick={() => setLightboxSrc(img)}
                               style={{ cursor: 'zoom-in' }}
                             />
@@ -1221,6 +1338,8 @@ export default function App() {
             </button>
           </div>
         </footer>
+        </>
+        )}
       </div>
 
       {/* ── Settings Modal ───────────────────────────────────────────── */}
@@ -1379,7 +1498,7 @@ export default function App() {
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
-          <img
+          <LocalImage
             src={lightboxSrc}
             alt="参考图预览"
             className="lightbox-img"

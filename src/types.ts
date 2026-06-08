@@ -42,3 +42,12 @@ export interface StoredState {
   model: string;
   openConvIds: string[];
 }
+
+export interface TrashItem {
+  id: string;
+  title: string;
+  imageCount: number;
+  createdAt: number;
+  updatedAt: number;
+  movedAt: number;
+}
