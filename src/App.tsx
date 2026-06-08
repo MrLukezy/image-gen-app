@@ -41,11 +41,23 @@ function formatDuration(ms: number): string {
   return `${m}m ${rem}s`;
 }
 
-function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
+function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0, autoCtx = true) {
+  if (!autoCtx) {
+    return {
+      contextImages: [] as string[],
+      userRefImageCount: currentUserRefImageCount,
+      historyImageCount: 0,
+      totalImageCount: currentUserRefImageCount,
+    };
+  }
+
   const lastAssistantImages = (() => {
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
-      if (e.type === 'assistant' && e.images && e.images.length > 0) return e.images;
+      if (e.type === 'assistant' && e.images && e.images.length > 0) {
+        if (e.images.length === 1) return e.images;
+        return [];
+      }
     }
     return [];
   })();
@@ -67,6 +79,32 @@ function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0) {
     historyImageCount: contextImages.length,
     totalImageCount,
   };
+}
+
+function finalizeEntries(entries: ConvEntry[]): ConvEntry[] {
+  return entries.map(e => {
+    if (!e.loading) return e;
+    if (e.batchId && e.batchImages) {
+      const updatedTasks = e.batchImages.map(t =>
+        t.status === 'loading' ? { ...t, status: 'failed' as const, error: '应用已关闭，生成中断' } : t
+      );
+      const successTasks = updatedTasks.filter(t => t.status === 'success');
+      const failCount = updatedTasks.filter(t => t.status === 'failed').length;
+      const successImages = successTasks.map(t => t.image!);
+      return {
+        ...e,
+        loading: false,
+        images: successImages.length > 0 ? successImages : undefined,
+        error: successImages.length === 0 ? `${failCount} 个任务中断（应用已关闭）`
+             : failCount > 0 ? `${failCount} 个任务中断（应用已关闭）` : undefined,
+        completedAt: Date.now(),
+        imageCount: successImages.length,
+        batchErrors: failCount,
+        batchImages: updatedTasks,
+      };
+    }
+    return { ...e, loading: false, error: '生成中断（应用已关闭）' };
+  });
 }
 
 interface ModelInfo {
@@ -151,6 +189,7 @@ export default function App() {
   const [providerFormUrl, setProviderFormUrl] = useState('');
   const [providerFormKey, setProviderFormKey] = useState('');
   const [parallelCount, setParallelCount] = useState(1);
+  const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
   const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -278,6 +317,9 @@ export default function App() {
   const cancelledRef = useRef(false);
   const activeConvIdRef = useRef(activeConvId);
   activeConvIdRef.current = activeConvId;
+  const batchConvIdRef = useRef<string | null>(null);
+  const batchSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const batchSaveEntriesRef = useRef<ConvEntry[] | null>(null);
   const loadConvsRunningRef = useRef(false);
   const loadConvsQueuedRef = useRef(false);
 
@@ -301,6 +343,23 @@ export default function App() {
     saveAppConfig({ apiUrl, apiKey, model, activeProviderId });
   }, [apiUrl, apiKey, model, activeProviderId]);
 
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (batchSaveTimerRef.current) {
+        clearTimeout(batchSaveTimerRef.current);
+        batchSaveTimerRef.current = null;
+      }
+      const convId = batchConvIdRef.current;
+      const entries = batchSaveEntriesRef.current;
+      if (convId && entries) {
+        const title = entries.find((e: ConvEntry) => e.type === 'user' && e.prompt)?.prompt?.slice(0, 30) || 'New Chat';
+        invoke('save_conversation', { conversationId: convId, title, entries }).catch(() => {});
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
   const loadConversations = async () => {
     if (loadConvsRunningRef.current) {
       loadConvsQueuedRef.current = true;
@@ -317,8 +376,12 @@ export default function App() {
         if (urlConvId) {
           const conv = all.find(c => c.id === urlConvId);
           if (conv) {
+            const finalized = finalizeEntries(conv.entries);
             setActiveConvId(conv.id);
-            setEntries(conv.entries.filter(e => !e.loading));
+            setEntries(finalized);
+            if (conv.entries.some(e => e.loading)) {
+              invoke('save_conversation', { conversationId: conv.id, title: conv.title, entries: finalized }).catch(() => {});
+            }
             return;
           }
         }
@@ -327,16 +390,24 @@ export default function App() {
         if (savedId) {
           const conv = all.find(c => c.id === savedId);
           if (conv) {
+            const finalized = finalizeEntries(conv.entries);
             setActiveConvId(conv.id);
-            setEntries(conv.entries.filter(e => !e.loading));
+            setEntries(finalized);
+            if (conv.entries.some(e => e.loading)) {
+              invoke('save_conversation', { conversationId: conv.id, title: conv.title, entries: finalized }).catch(() => {});
+            }
             return;
           }
         }
 
         if (all.length > 0) {
           const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+          const finalized = finalizeEntries(latest.entries);
           setActiveConvId(latest.id);
-          setEntries(latest.entries.filter(e => !e.loading));
+          setEntries(finalized);
+          if (latest.entries.some(e => e.loading)) {
+            invoke('save_conversation', { conversationId: latest.id, title: latest.title, entries: finalized }).catch(() => {});
+          }
         } else {
           const newId = await invoke<string>('create_conversation', { title: 'New Chat' });
           setActiveConvId(newId);
@@ -385,8 +456,14 @@ export default function App() {
   const switchConv = (id: string) => {
     const conv = conversations.find(c => c.id === id);
     if (conv) {
+      const hasLoading = conv.entries.some(e => e.loading);
+      const finalEntries = hasLoading ? finalizeEntries(conv.entries) : conv.entries;
       setActiveConvId(id);
-      setEntries(conv.entries);
+      setEntries(finalEntries);
+      if (hasLoading) {
+        const title = finalEntries.find((e: ConvEntry) => e.type === 'user' && e.prompt)?.prompt?.slice(0, 30) || conv.title;
+        invoke('save_conversation', { conversationId: id, title, entries: finalEntries }).catch(() => {});
+      }
     }
   };
 
@@ -402,7 +479,7 @@ export default function App() {
       if (remaining.length > 0) {
         const latest = [...remaining].sort((a, b) => b.updatedAt - a.updatedAt)[0];
         setActiveConvId(latest.id);
-        setEntries(latest.entries.filter(e => !e.loading));
+        setEntries(finalizeEntries(latest.entries));
       } else {
         setActiveConvId('');
         setEntries([]);
@@ -427,6 +504,10 @@ export default function App() {
   const permanentDelete = async (id: string) => {
     await invoke('permanent_delete_trash', { conversationId: id });
     loadTrash();
+  };
+  const deleteAllTrash = async () => {
+    await invoke('permanent_delete_all_trash');
+    setTrashItems([]);
   };
 
   const openTrashView = () => {
@@ -497,7 +578,7 @@ export default function App() {
     const allRefs = [...urlRefs, ...pastedImages];
 
     const { contextImages, historyImageCount } =
-      buildContext(entries, allRefs.length);
+      buildContext(entries, allRefs.length, autoContext);
 
     // Validate total reference images (user + context) <= 6
     const totalRefs = allRefs.length + historyImageCount;
@@ -630,11 +711,15 @@ export default function App() {
     batchProgressRef.current[batchId]![taskIdx] = {
       ...batchProgressRef.current[batchId]![taskIdx], status: 'success', image,
     };
-    setEntries(prev => prev.map(e =>
-      e.batchId === batchId && e.loading
-        ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
-        : e
-    ));
+    setEntries(prev => {
+      const updated = prev.map(e =>
+        e.batchId === batchId && e.loading
+          ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
+          : e
+      );
+      scheduleBatchSave(updated);
+      return updated;
+    });
   };
 
   const updateEntryError = (batchId: string, taskIdx: number, error: string) => {
@@ -642,20 +727,38 @@ export default function App() {
     batchProgressRef.current[batchId]![taskIdx] = {
       ...batchProgressRef.current[batchId]![taskIdx], status: 'failed', error,
     };
-    setEntries(prev => prev.map(e =>
-      e.batchId === batchId && e.loading
-        ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
-        : e
-    ));
+    setEntries(prev => {
+      const updated = prev.map(e =>
+        e.batchId === batchId && e.loading
+          ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
+          : e
+      );
+      scheduleBatchSave(updated);
+      return updated;
+    });
+  };
+
+  const scheduleBatchSave = (updatedEntries: ConvEntry[]) => {
+    batchSaveEntriesRef.current = updatedEntries;
+    if (batchSaveTimerRef.current) clearTimeout(batchSaveTimerRef.current);
+    batchSaveTimerRef.current = setTimeout(() => {
+      const convId = batchConvIdRef.current;
+      const entries = batchSaveEntriesRef.current;
+      if (!convId || !entries) return;
+      const title = entries.find((e: ConvEntry) => e.type === 'user' && e.prompt)?.prompt?.slice(0, 30) || 'New Chat';
+      invoke('save_conversation', { conversationId: convId, title, entries }).catch(() => {});
+      batchSaveTimerRef.current = null;
+    }, 1500);
   };
 
   const handleBatchSend = async () => {
     if (!prompt.trim() || isLoading || !activeConvId) return;
     const convId = activeConvId;
+    batchConvIdRef.current = convId;
     const userPrompt = prompt.trim();
     const urlRefs = showRefInput ? refUrls.split('\n').map(u => u.trim()).filter(u => u.trim().length > 0) : [];
     const allRefs = [...urlRefs, ...pastedImages];
-    const { contextImages, historyImageCount } = buildContext(entries, allRefs.length);
+    const { contextImages, historyImageCount } = buildContext(entries, allRefs.length, false);
     const totalRefs = allRefs.length + historyImageCount;
     if (totalRefs > 6) {
       setValidationError(`参考图数量不能超过 6 张（当前 ${totalRefs} 张），请减少参考图或清空历史对话`);
@@ -753,6 +856,9 @@ export default function App() {
     const finalEntries = [...base, userEntry, done];
     setLoadingConvs(prev => { const n = new Set(prev); n.delete(convId); return n; });
     delete batchProgressRef.current[batchId];
+    if (batchSaveTimerRef.current) { clearTimeout(batchSaveTimerRef.current); batchSaveTimerRef.current = null; }
+    batchConvIdRef.current = null;
+    batchSaveEntriesRef.current = null;
     const title = userPrompt.slice(0, 30) || 'New Chat';
     await invoke('save_conversation', { conversationId: convId, title, entries: finalEntries });
     if (activeConvIdRef.current === convId) setEntries(finalEntries);
@@ -795,7 +901,7 @@ export default function App() {
 
   const currentUserRefCount =
     pastedImages.length + refUrls.split('\n').filter(u => u.trim().length > 0).length;
-  const contextInfo = buildContext(entries, currentUserRefCount);
+  const contextInfo = buildContext(entries, currentUserRefCount, autoContext && parallelCount <= 1);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -926,6 +1032,20 @@ export default function App() {
                 </button>
                 <h1 className="app-title">回收站</h1>
                 <span className="model-badge">{trashItems.length} 项</span>
+                {trashItems.length > 0 && (
+                  <button
+                    className="header-icon-btn trash-clear-btn"
+                    onClick={deleteAllTrash}
+                    title="清空回收站（不可恢复）"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <line x1="2" y1="2" x2="22" y2="22" />
+                    </svg>
+                    清空
+                  </button>
+                )}
               </div>
               <div className="header-right">
                 <div className="window-controls">
@@ -1136,8 +1256,13 @@ export default function App() {
           <div className="header-center" />
           <div className="header-right">
             {contextInfo.totalImageCount > 0 && (
-              <span className="context-badge" title={`上下文：本次上传 ${contextInfo.userRefImageCount} 张\n历史参考图 ${contextInfo.historyImageCount} 张`}>
+              <span className="context-badge" title={`上下文：本次上传 ${contextInfo.userRefImageCount} 张${contextInfo.historyImageCount > 0 ? `\n历史参考图 ${contextInfo.historyImageCount} 张（自动上下文）` : ''}${parallelCount > 1 ? '\n（多图生成时自动上下文已关闭）' : ''}`}>
                 上下文: {contextInfo.totalImageCount}图
+              </span>
+            )}
+            {!autoContext && contextInfo.totalImageCount === 0 && (
+              <span className="context-badge" style={{ opacity: 0.6 }} title="已关闭自动上下文，本次对话不会自动关联历史生成图">
+                上下文: 关闭
               </span>
             )}
             <button
@@ -1499,6 +1624,20 @@ export default function App() {
                 <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" /><line x1="6" y1="2" x2="6" y2="10" stroke="currentColor" strokeWidth="1.5" /></svg>
               </button>
             </div>
+
+            <label
+              className={`auto-context-toggle ${autoContext ? 'active' : ''} ${parallelCount > 1 ? 'disabled' : ''}`}
+              title="勾选自动设定上下文：单张图片生成后，最后一张图片默认作为上下文参考图。多张图片中，自动上下文无效，仅使用复制粘贴的参考图。"
+            >
+              <input
+                type="checkbox"
+                checked={autoContext && parallelCount <= 1}
+                onChange={e => { setAutoContext(e.target.checked); if (e.target.checked) setValidationError(''); }}
+                disabled={isLoading || parallelCount > 1}
+              />
+              <span className="auto-context-slider" />
+              <span className="auto-context-text">自动上下文</span>
+            </label>
 
             <div className="preset-toggle-group">
               <button

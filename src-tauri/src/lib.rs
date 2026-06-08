@@ -798,6 +798,18 @@ fn permanent_delete_trash(
     }
 }
 
+#[tauri::command]
+fn permanent_delete_all_trash(
+    app: tauri::AppHandle,
+) {
+    if let Some(base) = trash_root(&app) {
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+            let _ = fs::create_dir_all(&base);
+        }
+    }
+}
+
 fn cleanup_expired_trash(app: &tauri::AppHandle) {
     let base = match trash_root(app) {
         Some(p) => p,
@@ -1110,6 +1122,7 @@ pub fn run() {
             list_trash,
             restore_trash,
             permanent_delete_trash,
+            permanent_delete_all_trash,
             window_close,
             window_minimize,
             window_maximize,

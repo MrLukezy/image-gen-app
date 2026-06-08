@@ -316,6 +316,23 @@
   background: var(--accent-dim);
 }
 
+.trash-clear-btn {
+  width: auto;
+  gap: 4px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--error);
+  border: 1px solid rgba(229, 83, 75, 0.3);
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.trash-clear-btn:hover {
+  background: rgba(229, 83, 75, 0.15);
+  border-color: var(--error);
+  color: var(--error);
+}
+
 .window-controls {
   display: flex;
   align-items: center;
@@ -1870,6 +1887,89 @@
 .batch-count-input::-webkit-inner-spin-button,
 .batch-count-input::-webkit-outer-spin-button {
   -webkit-appearance: none;
+}
+
+/* ── Auto Context Toggle ──────────────────────────────────────────────── */
+
+.auto-context-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: all 0.15s;
+  user-select: none;
+  position: relative;
+}
+
+.auto-context-toggle:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.auto-context-toggle.active {
+  border-color: rgba(201, 149, 108, 0.5);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.auto-context-toggle.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--text-secondary);
+}
+
+.auto-context-toggle.disabled:hover {
+  border-color: var(--border);
+}
+
+.auto-context-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.auto-context-slider {
+  position: relative;
+  width: 22px;
+  height: 12px;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.auto-context-slider::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 8px;
+  height: 8px;
+  background: var(--text-secondary);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.auto-context-toggle.active .auto-context-slider {
+  background: var(--accent);
+}
+
+.auto-context-toggle.active .auto-context-slider::after {
+  transform: translateX(10px);
+  background: white;
+}
+
+.auto-context-text {
+  font-weight: 500;
 }
 
 /* ── Batch Loading Card ───────────────────────────────────────────────── */
