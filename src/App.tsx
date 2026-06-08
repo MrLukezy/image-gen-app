@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation, TrashItem } from './types';
+import type { ConvEntry, Conversation, TrashItem, BatchTask } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import {
   getAppConfig, saveAppConfig,
@@ -150,6 +150,9 @@ export default function App() {
   const [providerFormName, setProviderFormName] = useState('');
   const [providerFormUrl, setProviderFormUrl] = useState('');
   const [providerFormKey, setProviderFormKey] = useState('');
+  const [parallelCount, setParallelCount] = useState(1);
+  const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
+  const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handlePresetHover = (p: { img: string }, e: React.MouseEvent) => {
@@ -483,6 +486,7 @@ export default function App() {
   // ── Send ─────────────────────────────────────────────────────────────
   const handleSend = async () => {
     if (!prompt.trim() || isLoading || !activeConvId) return;
+    if (parallelCount > 1) { handleBatchSend(); return; }
 
     const convId = activeConvId;
     const userPrompt = prompt.trim();
@@ -619,6 +623,141 @@ export default function App() {
     } catch (err) {
       finalize([], String(err));
     }
+  };
+
+  const updateEntryImages = (batchId: string, taskIdx: number, image: string) => {
+    if (!batchProgressRef.current[batchId]) return;
+    batchProgressRef.current[batchId]![taskIdx] = {
+      ...batchProgressRef.current[batchId]![taskIdx], status: 'success', image,
+    };
+    setEntries(prev => prev.map(e =>
+      e.batchId === batchId && e.loading
+        ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
+        : e
+    ));
+  };
+
+  const updateEntryError = (batchId: string, taskIdx: number, error: string) => {
+    if (!batchProgressRef.current[batchId]) return;
+    batchProgressRef.current[batchId]![taskIdx] = {
+      ...batchProgressRef.current[batchId]![taskIdx], status: 'failed', error,
+    };
+    setEntries(prev => prev.map(e =>
+      e.batchId === batchId && e.loading
+        ? { ...e, batchImages: [...(batchProgressRef.current[batchId] || [])] }
+        : e
+    ));
+  };
+
+  const handleBatchSend = async () => {
+    if (!prompt.trim() || isLoading || !activeConvId) return;
+    const convId = activeConvId;
+    const userPrompt = prompt.trim();
+    const urlRefs = showRefInput ? refUrls.split('\n').map(u => u.trim()).filter(u => u.trim().length > 0) : [];
+    const allRefs = [...urlRefs, ...pastedImages];
+    const { contextImages, historyImageCount } = buildContext(entries, allRefs.length);
+    const totalRefs = allRefs.length + historyImageCount;
+    if (totalRefs > 6) {
+      setValidationError(`参考图数量不能超过 6 张（当前 ${totalRefs} 张），请减少参考图或清空历史对话`);
+      setTimeout(() => setValidationError(''), 5000);
+      return;
+    }
+    setValidationError('');
+    let enrichedPrompt = userPrompt;
+    const presetParts: string[] = [];
+    const negativeParts: string[] = [];
+    selectedPresets.forEach(v => {
+      if (v.startsWith('[negative:')) negativeParts.push(v);
+      else presetParts.push(v);
+    });
+    if (presetParts.length > 0) enrichedPrompt += `\n\n[风格参数] ${presetParts.join(', ')}`;
+    if (negativeParts.length > 0) {
+      const negFlat = negativeParts.map(n => n.replace('[negative: ', '').replace(']', '')).join(', ');
+      enrichedPrompt += `\n\n[Negative prompt] ${negFlat}`;
+    }
+    const refImages = totalRefs > 0 ? [...allRefs, ...contextImages] : undefined;
+    const userEntry: ConvEntry = {
+      id: genId(), type: 'user', prompt: userPrompt, timestamp: Date.now(),
+      size, model, refImages: allRefs.length > 0 ? allRefs : undefined,
+    };
+    const batchId = genId();
+    const initialBatchImages: BatchTask[] = Array.from({ length: parallelCount }, (_, i) => ({ id: i, status: 'loading' as const }));
+    batchProgressRef.current[batchId] = [...initialBatchImages];
+    const loadingEntry: ConvEntry = {
+      id: genId(), type: 'assistant', loading: true, timestamp: Date.now(),
+      size, batchId, batchTotal: parallelCount, batchImages: initialBatchImages,
+    };
+    setPrompt('');
+    setPastedImages([]);
+    cancelledRef.current = false;
+    const snapshotEntries = [...entries];
+    const beforeEntries = [...snapshotEntries, userEntry, loadingEntry];
+    setEntries(beforeEntries);
+    setLoadingConvs(prev => { const n = new Set(prev); n.add(convId); return n; });
+    const inProgressTitle = userPrompt.slice(0, 30) || 'New Chat';
+    await invoke('save_conversation', { conversationId: convId, title: inProgressTitle, entries: beforeEntries });
+    setTimeout(() => loadConversations(), 50);
+    const startTime = Date.now();
+    const BATCH_SIZE = 5;
+    const allResults: ({ images: string[]; error: string | null } | null)[] = Array(parallelCount).fill(null);
+    for (let batchStart = 0; batchStart < parallelCount; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, parallelCount);
+      const promises: Promise<void>[] = [];
+      for (let i = batchStart; i < batchEnd; i++) {
+        const idx = i;
+        promises.push(
+          invoke<{ images: string[]; error: string | null }>('generate_image', {
+            prompt: enrichedPrompt, apiKey, apiUrl, model, size, n: 1,
+            referenceImages: refImages, responseFormat: 'b64_json',
+          }).then(result => {
+            allResults[idx] = result;
+            if (result.images && result.images.length > 0) updateEntryImages(batchId, idx, result.images[0]);
+            else updateEntryError(batchId, idx, result.error || 'Unknown error');
+          }).catch(err => {
+            allResults[idx] = { images: [], error: String(err) };
+            updateEntryError(batchId, idx, String(err));
+          })
+        );
+      }
+      await Promise.allSettled(promises);
+    }
+    if (cancelledRef.current && activeConvIdRef.current === convId) return;
+    const endTime = Date.now();
+    const images: string[] = [];
+    const batchImages: BatchTask[] = [];
+    let errorCount = 0;
+    const taskErrors: string[] = [];
+    allResults.forEach((result, i) => {
+      const imgs = result?.images ?? [];
+      const err = result?.error ?? null;
+      if (imgs.length > 0) {
+        images.push(imgs[0]);
+        batchImages.push({ id: i, status: 'success', image: imgs[0] });
+      } else {
+        errorCount++;
+        batchImages.push({ id: i, status: 'failed', error: err || 'Unknown error' });
+        taskErrors.push(err || `生成 #${i + 1} 失败`);
+      }
+    });
+    const done: ConvEntry = {
+      ...loadingEntry, loading: false,
+      images: images.length > 0 ? images : undefined,
+      error: images.length === 0 ? `全部 ${errorCount} 个任务失败` : undefined,
+      duration: endTime - startTime, completedAt: endTime,
+      imageCount: images.length, model,
+      contextImageCount: historyImageCount,
+      batchId, batchTotal: parallelCount,
+      batchImages, batchErrors: errorCount,
+    };
+    const base = snapshotEntries.filter(e => e.id !== loadingEntry.id && e.id !== userEntry.id);
+    const finalEntries = [...base, userEntry, done];
+    setLoadingConvs(prev => { const n = new Set(prev); n.delete(convId); return n; });
+    delete batchProgressRef.current[batchId];
+    const title = userPrompt.slice(0, 30) || 'New Chat';
+    await invoke('save_conversation', { conversationId: convId, title, entries: finalEntries });
+    if (activeConvIdRef.current === convId) setEntries(finalEntries);
+    setTimeout(() => loadConversations(), 100);
+    inputRef.current?.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -849,6 +988,127 @@ export default function App() {
                 })}
             </main>
           </div>
+        ) : showBatchDetail ? (
+          <div className="trash-view">
+            <header className="app-header">
+              <div className="header-left">
+                <button className="header-icon-btn" onClick={() => setShowBatchDetail(null)} title="返回对话">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
+                  </svg>
+                </button>
+                <h1 className="app-title">生成结果</h1>
+                {(() => {
+                  const batchEntry = entries.find(e => e.batchId === showBatchDetail);
+                  if (!batchEntry) return null;
+                  const successTasks = (batchEntry.batchImages || []).filter(t => t.status === 'success');
+                  const failedTasks = (batchEntry.batchImages || []).filter(t => t.status === 'failed');
+                  const loadingTasks = (batchEntry.batchImages || []).filter(t => t.status === 'loading');
+                  const total = batchEntry.batchTotal || 0;
+                  return (
+                    <>
+                      <span className="model-badge">{successTasks.length}/{total} 成功</span>
+                      {failedTasks.length > 0 && <span className="model-badge" style={{ color: 'var(--error)' }}>{failedTasks.length} 失败</span>}
+                      {loadingTasks.length > 0 && <span className="model-badge" style={{ color: 'var(--text-secondary)' }}>{loadingTasks.length} 进行中</span>}
+                    </>
+                  );
+                })()}
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <main className="batch-detail-main">
+              {(() => {
+                const batchEntry = entries.find(e => e.batchId === showBatchDetail);
+                if (!batchEntry) return <div className="welcome"><h2>批次不存在</h2></div>;
+                const tasks = batchEntry.batchImages || [];
+                const successCount = tasks.filter(t => t.status === 'success').length;
+                const failedCount = tasks.filter(t => t.status === 'failed').length;
+                const loadingCount = tasks.filter(t => t.status === 'loading').length;
+                const total = batchEntry.batchTotal || 0;
+                const progress = successCount + failedCount;
+                const progressPct = total > 0 ? (progress / total) * 100 : 0;
+                return (
+                  <>
+                    <div className="batch-detail-stats">
+                      <div className="batch-detail-stat">
+                        <span className="stat-number">{total}</span>
+                        <span className="stat-label">总任务</span>
+                      </div>
+                      <div className="batch-detail-stat success">
+                        <span className="stat-number">{successCount}</span>
+                        <span className="stat-label">成功</span>
+                      </div>
+                      <div className="batch-detail-stat failed">
+                        <span className="stat-number">{failedCount}</span>
+                        <span className="stat-label">失败</span>
+                      </div>
+                      <div className="batch-detail-stat loading-stat">
+                        <span className="stat-number">{loadingCount}</span>
+                        <span className="stat-label">进行中</span>
+                      </div>
+                    </div>
+                    {loadingCount > 0 && (
+                      <div className="batch-detail-progress">
+                        <div className="batch-loading-bar">
+                          <div className="batch-loading-fill" style={{ width: `${progressPct}%` }} />
+                        </div>
+                        <span className="batch-progress-text">{Math.round(progressPct)}%</span>
+                      </div>
+                    )}
+                    <div className="batch-detail-grid">
+                      {tasks.map((task, i) => (
+                        <div key={i} className={`batch-detail-card ${task.status}`}>
+                          {task.status === 'loading' && (
+                            <div className="batch-detail-placeholder">
+                              <div className="loading-spinner" />
+                              <span>生成中 #{i + 1}</span>
+                            </div>
+                          )}
+                          {task.status === 'success' && task.image && (
+                            <>
+                              <div className="batch-detail-img" onClick={() => setLightboxSrc(task.image!)}>
+                                <LocalImage src={task.image} alt={`图片 #${i + 1}`} style={{ cursor: 'zoom-in' }} />
+                              </div>
+                              <div className="batch-detail-overlay-actions">
+                                <a href={task.image} target="_blank" rel="noreferrer" className="img-action-btn" title="新窗口打开" onClick={e => e.stopPropagation()}>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                    <polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+                                  </svg>
+                                </a>
+                              </div>
+                            </>
+                          )}
+                          {task.status === 'failed' && (
+                            <div className="batch-detail-placeholder batch-detail-error">
+                              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                              </svg>
+                              <span>#{i + 1}</span>
+                              <span className="batch-detail-err-reason" title={task.error}>{task.error?.slice(0, 40) || '失败'}</span>
+                            </div>
+                          )}
+                          <div className="batch-detail-index">#{i + 1}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+            </main>
+          </div>
         ) : (
           <>
         {/* Header */}
@@ -972,12 +1232,82 @@ export default function App() {
                     </svg>
                   </div>
                   <div className="msg-body">
-                    {entry.loading && (
+                    {entry.loading && !entry.batchTotal && (
                       <div className="loading-container">
                         <div className="loading-spinner" />
                         <span className="loading-text">正在生成图片...</span>
                       </div>
                     )}
+                    {(() => {
+                      const isBatch = entry.batchTotal != null && entry.batchTotal > 1;
+                      const isLoadingBatch = entry.loading && isBatch;
+                      const doneBatch = !entry.loading && isBatch;
+
+                      if (!isLoadingBatch && !doneBatch) return null;
+
+                      const tasks = entry.batchImages || [];
+                      const successTasks = tasks.filter(t => t.status === 'success');
+                      const failedTasks = tasks.filter(t => t.status === 'failed');
+                      const loadingTasks = tasks.filter(t => t.status === 'loading');
+                      const total = entry.batchTotal || 1;
+                      const progressPct = total > 0 ? ((successTasks.length + failedTasks.length) / total) * 100 : 0;
+                      const allSuccess = loadingTasks.length === 0 && failedTasks.length === 0 && successTasks.length > 0;
+
+                      return (
+                        <div className={`batch-group-card ${entry.loading ? 'loading' : ''}`} onClick={() => setShowBatchDetail(entry.batchId!)}>
+                          <div className="batch-group-header">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+                              <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+                            </svg>
+                            {entry.loading ? (
+                              <span className="batch-group-count">
+                                生成中 {successTasks.length}/{total}
+                                {failedTasks.length > 0 && <span className="batch-group-errors-inline">{failedTasks.length}失败</span>}
+                              </span>
+                            ) : (
+                              <>
+                                <span className="batch-group-count">{successTasks.length} 张图片</span>
+                                {entry.batchErrors != null && entry.batchErrors > 0 && (
+                                  <span className="batch-group-errors">{entry.batchErrors} 失败</span>
+                                )}
+                                {allSuccess && <span className="batch-group-success">全部成功</span>}
+                              </>
+                            )}
+                            <span className="batch-group-hint">点击查看详情</span>
+                          </div>
+                          {entry.loading && (
+                            <div className="batch-loading-bar">
+                              <div className="batch-loading-fill" style={{ width: `${progressPct}%` }} />
+                            </div>
+                          )}
+                          <div className="batch-group-grid">
+                            {tasks.filter(t => t.status === 'success').map((t, i) => (
+                              <div key={`s${i}`} className="batch-group-thumb">
+                                <LocalImage src={t.image!} alt={`图 ${i + 1}`} />
+                              </div>
+                            ))}
+                            {tasks.filter(t => t.status === 'loading').slice(0, 6).map((t, i) => (
+                              <div key={`l${i}`} className="batch-group-thumb loading-thumb">
+                                <div className="loading-spinner" />
+                                <div className="batch-group-task-id">#{t.id + 1}</div>
+                              </div>
+                            ))}
+                            {tasks.filter(t => t.status === 'failed').map((t, i) => (
+                              <div key={`f${i}`} className="batch-group-thumb failed-thumb">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                                </svg>
+                                <div className="batch-group-task-id">#{t.id + 1}</div>
+                              </div>
+                            ))}
+                            {tasks.filter(t => t.status === 'loading').length > 6 && (
+                              <div className="batch-group-more">+{tasks.filter(t => t.status === 'loading').length - 6} 排队中</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {entry.error && (
                       <div className="error-msg">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -986,7 +1316,7 @@ export default function App() {
                         {entry.error}
                       </div>
                     )}
-                    {entry.images && entry.images.length > 0 && (
+                    {!entry.loading && (!entry.batchTotal || entry.batchTotal <= 1) && entry.images && entry.images.length > 0 && (
                       <div className="image-grid">
                         {entry.images.map((img, i) => (
                           <div key={i} className="image-card">
@@ -1026,6 +1356,15 @@ export default function App() {
                           <span className="summary-item">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
                             {entry.imageCount} 张
+                          </span>
+                        )}
+                        {entry.batchTotal != null && entry.batchTotal > 1 && (
+                          <span className="summary-item batch-summary">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+                              <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+                            </svg>
+                            {entry.batchTotal}并行{entry.batchErrors != null && entry.batchErrors > 0 ? ` ${entry.batchErrors}失败` : ''}
                           </span>
                         )}
                         {entry.contextImageCount != null && entry.contextImageCount > 0 ? (
@@ -1130,6 +1469,36 @@ export default function App() {
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
+
+            <div className="batch-count-control" title="并行生成数量">
+              <span className="batch-count-label">并行</span>
+              <button
+                className="batch-count-btn"
+                onClick={() => setParallelCount(c => Math.max(1, c - 1))}
+                disabled={isLoading || parallelCount <= 1}
+              >
+                <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" /></svg>
+              </button>
+              <input
+                type="number"
+                className="batch-count-input"
+                value={parallelCount}
+                min={1}
+                max={20}
+                onChange={e => {
+                  const v = parseInt(e.target.value);
+                  if (!isNaN(v) && v >= 1 && v <= 20) setParallelCount(v);
+                }}
+                disabled={isLoading}
+              />
+              <button
+                className="batch-count-btn"
+                onClick={() => setParallelCount(c => Math.min(20, c + 1))}
+                disabled={isLoading || parallelCount >= 20}
+              >
+                <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" /><line x1="6" y1="2" x2="6" y2="10" stroke="currentColor" strokeWidth="1.5" /></svg>
+              </button>
+            </div>
 
             <div className="preset-toggle-group">
               <button

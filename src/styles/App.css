@@ -1811,3 +1811,436 @@
   background: rgba(201, 80, 90, 0.15);
   color: #e07078;
 }
+
+/* ── Batch Count Control ──────────────────────────────────────────────── */
+
+.batch-count-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 8px;
+}
+
+.batch-count-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.batch-count-btn {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.batch-count-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.batch-count-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.batch-count-input {
+  width: 28px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: center;
+  outline: none;
+  font-family: 'Cascadia Code', monospace;
+  -moz-appearance: textfield;
+}
+
+.batch-count-input::-webkit-inner-spin-button,
+.batch-count-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+/* ── Batch Loading Card ───────────────────────────────────────────────── */
+
+.batch-loading-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-loading-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.batch-loading-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.batch-loading-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'Cascadia Code', monospace;
+}
+
+.batch-loading-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.batch-loading-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.batch-loading-tasks {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.batch-task-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.3s ease;
+}
+
+.batch-task-dot.completed {
+  background: var(--accent);
+}
+
+/* ── Batch Group Card ─────────────────────────────────────────────────── */
+
+.batch-group-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.batch-group-card:hover {
+  border-color: var(--accent);
+  transform: scale(1.01);
+}
+
+.batch-group-card.loading {
+  pointer-events: auto;
+  cursor: default;
+}
+
+.batch-group-card.loading .batch-group-hint {
+  display: none;
+}
+
+.batch-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.batch-group-count {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.batch-group-errors,
+.batch-group-errors-inline {
+  color: var(--error);
+  font-size: 11px;
+  background: rgba(229, 83, 75, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.batch-group-success {
+  color: var(--success);
+  font-size: 11px;
+  background: rgba(63, 185, 80, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.batch-group-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: normal;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.batch-group-card:not(.loading):hover .batch-group-hint {
+  opacity: 1;
+}
+
+.batch-group-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  padding: 0 2px 2px 2px;
+}
+
+.batch-group-thumb {
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 4px;
+  position: relative;
+}
+
+.batch-group-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.batch-group-thumb.loading-thumb {
+  background: var(--bg-input);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.batch-group-thumb.failed-thumb {
+  background: rgba(229, 83, 75, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--error);
+}
+
+.batch-group-task-id {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: 'Cascadia Code', monospace;
+}
+
+.batch-group-more {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 4px;
+}
+
+/* ── Batch Summary ────────────────────────────────────────────────────── */
+
+.batch-summary {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* ── Batch Detail Page ─────────────────────────────────────────────────── */
+
+.batch-detail-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.batch-detail-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.batch-detail-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 80px;
+  flex: 1;
+}
+
+.batch-detail-stat.success {
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+.batch-detail-stat.failed {
+  border-color: rgba(229, 83, 75, 0.3);
+}
+
+.batch-detail-stat.loading-stat {
+  border-color: rgba(201, 149, 108, 0.3);
+}
+
+.stat-number {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: 'Cascadia Code', monospace;
+}
+
+.batch-detail-stat.success .stat-number {
+  color: var(--success);
+}
+
+.batch-detail-stat.failed .stat-number {
+  color: var(--error);
+}
+
+.batch-detail-stat.loading-stat .stat-number {
+  color: var(--accent);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.batch-detail-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.batch-detail-progress .batch-loading-bar {
+  flex: 1;
+  height: 4px;
+}
+
+.batch-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'Cascadia Code', monospace;
+  min-width: 40px;
+}
+
+.batch-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.batch-detail-card {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  aspect-ratio: 1;
+  transition: border-color 0.2s;
+}
+
+.batch-detail-card.success:hover {
+  border-color: var(--accent);
+}
+
+.batch-detail-card.success {
+  cursor: zoom-in;
+}
+
+.batch-detail-img {
+  width: 100%;
+  height: 100%;
+}
+
+.batch-detail-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.batch-detail-overlay-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.batch-detail-card:hover .batch-detail-overlay-actions {
+  opacity: 1;
+}
+
+.batch-detail-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}
+
+.batch-detail-error {
+  color: var(--error);
+}
+
+.batch-detail-err-reason {
+  font-size: 10px;
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.batch-detail-index {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Cascadia Code', monospace;
+}

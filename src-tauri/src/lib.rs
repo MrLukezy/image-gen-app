@@ -45,6 +45,17 @@ struct TrashItem {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct BatchTaskEntry {
+    id: u32,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ConvEntry {
     id: String,
     #[serde(rename = "type")]
@@ -74,6 +85,14 @@ struct ConvEntry {
     context_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_image_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_images: Option<Vec<BatchTaskEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_errors: Option<u32>,
 }
 
 // ──────────────────────────── HTTP Client ─────────────────────────────────

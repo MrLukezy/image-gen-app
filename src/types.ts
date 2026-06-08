@@ -1,3 +1,10 @@
+export interface BatchTask {
+  id: number;
+  status: 'loading' | 'success' | 'failed';
+  image?: string;
+  error?: string;
+}
+
 export interface ConvEntry {
   id: string;
   type: 'user' | 'assistant';
@@ -13,6 +20,10 @@ export interface ConvEntry {
   imageCount?: number;
   model?: string;
   contextImageCount?: number;
+  batchId?: string;
+  batchTotal?: number;
+  batchImages?: BatchTask[];
+  batchErrors?: number;
 }
 
 export interface Conversation {
