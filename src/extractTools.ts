@@ -3,17 +3,16 @@ export interface ExtractTool {
   name: string;
   icon: string;
   description: string;
-  category: 'extract' | 'analyze' | 'edit';
+  category: 'extract' | 'tools' | 'ai-tools';
   prompt: string;
-  requiresRegion?: boolean;
-  requiresPixelColor?: boolean;
-  responseFormat?: 'text' | 'image';
+  responseFormat?: 'text' | 'image' | 'multi-image';
+  multiImagePrompt?: string;
 }
 
 export const EXTRACT_CATEGORIES = [
   { id: 'extract', name: '提取', icon: '🧹' },
-  { id: 'analyze', name: '分析', icon: '🔍' },
-  { id: 'edit', name: '编辑', icon: '✏️' },
+  { id: 'tools', name: '工具', icon: '🔧' },
+  { id: 'ai-tools', name: 'AI工具', icon: '✨' },
 ];
 
 export const EXTRACT_TOOLS: ExtractTool[] = [
@@ -24,21 +23,42 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
     description: '分离出图片中的主要人物/角色，输出带透明背景的结果',
     category: 'extract',
     responseFormat: 'image',
-    prompt: `You are an image processing assistant specialized in character extraction.
+    prompt: `你是一个专业的角色提取AI助手。
 
-Step 1 — Analyze: Carefully examine the image. Identify the main character/subject. Describe their appearance in precise detail: clothing, hairstyle, hair color, pose, facial features, expression, accessories, body type, distinguishing marks.
+**任务**：分析图片中的主要人物/角色，提取其完整外貌描述，并生成一个用于创建该角色三视图的高质量提示词。
 
-Step 2 — Compose: Write a complete image-generation prompt that will recreate this character as a standalone full-body portrait with a clean plain background (pure white or single-color), in the same artistic style as the source image, high detail, sharp focus.
+**严格要求**：
+1. 生成的图片**只能包含该角色本身**，绝对不能有任何其他物体、背景元素、装饰物、道具、武器等
+2. 背景必须是**纯白色** (#FFFFFF)，无任何纹理、渐变或装饰
+3. 输出PNG格式，背景完全透明
+4. 角色必须展示**三视图**：正面视图、侧面视图、3/4视角（或四视图：正面、侧面、背面、3/4视角）
+5. 每个视角中角色的姿势必须保持一致
+6. 不能有任何阴影投射到地面上
+7. 不能有环境光效或氛围光
+8. 画面中不能出现任何文字、标签、标注
 
-You MUST output your response in **exactly this two-section format** (do not add any other sections or commentary outside these blocks):
+**分析步骤**：
+1. 仔细观察图片，识别主要人物/角色
+2. 详细记录：服装（颜色、款式、材质、配饰）、发型和发色、面部特征、体型比例、姿态、任何显著特征（疤痕、纹身、特殊装饰等）
+3. 注意角色的整体风格和艺术风格
 
-**### Analysis**
-[Your detailed character description here, 3-6 bullet points]
+**输出格式**：
+请用以下格式输出（使用中文）：
 
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One single paragraph prompt suitable for an image generation model, including: subject description, pose, clothing, style, background ("on plain white background" or "isolated on clean single-color background"), quality tags. Example: "a young woman with long black hair, wearing a red leather jacket and jeans, confident standing pose, anime cel-shaded style, on pure white background, full body, detailed, 4k"]
-<<<GENERATION_PROMPT_END>>>`,
+### 角色分析
+[详细描述角色的外貌特征，包括服装、发型、面部、体型、姿态等]
+
+### 生成提示词
+[创建一个详细的英文提示词，用于生成该角色的三视图。提示词应包含：
+- 角色外形的完整描述
+- "character reference sheet"或"orthographic views"关键词
+- "front view, side view, 3/4 view"或"front view, side view, back view, 3/4 view"
+- "pure white background"
+- "consistent pose"
+- "high detail, professional character design"
+- "PNG format with transparent background"
+- 明确声明"NO other objects, NO props, NO decorations, NO background elements"
+]`,
   },
   {
     id: 'extract_background',
@@ -47,262 +67,270 @@ You MUST output your response in **exactly this two-section format** (do not add
     description: '移除前景元素，仅保留背景场景',
     category: 'extract',
     responseFormat: 'image',
-    prompt: `You are an image processing assistant specialized in background extraction.
+    prompt: `你是一个专业的背景提取AI助手。
 
-Step 1 — Analyze: Examine the image. Identify and describe the background environment, completely ignoring any foreground subjects (people, characters, objects, text, UI elements). Describe the scene, environment, lighting, colors, atmosphere, textures, time of day, weather.
+**任务**：分析图片中的背景场景，移除所有前景元素（人物、角色、物体、文字、UI元素等），提取纯净的背景。
 
-Step 2 — Compose: Write a complete image-generation prompt that will recreate only this background scene — with all foreground subjects removed — in the same artistic style as the source image.
+**严格要求**：
+1. 生成的图片**只能包含背景场景**，绝对不能有任何人物、角色、前景物体
+2. 背景应该是完整的场景，包括远处的环境、天空、光照、颜色、纹理和氛围元素
+3. 如果原图中有被前景物体遮挡的背景区域，需要根据上下文合理补全
+4. 保持原图的艺术风格和氛围
 
-You MUST output your response in **exactly this two-section format**:
+**分析步骤**：
+1. 识别并忽略所有前景元素（人物、角色、近景物体、文字等）
+2. 详细描述背景场景：环境类型（室内/室外、地点）、时间（白天/夜晚）、光照条件和方向、颜色调色板、材质和纹理、氛围（平静、神秘、壮丽等）
+3. 注意背景中的细节：远处的建筑、植被、天空、光影效果等
 
-**### Analysis**
-[Your detailed background analysis here, 3-6 bullet points]
+**输出格式**：
+请用以下格式输出（使用中文）：
 
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One paragraph prompt describing only the background, no people/characters/foreground objects, maintaining style, lighting, time of day, atmosphere. Example: "a bustling cyberpunk alley at night, neon signs in pink and blue, wet reflective streets, steam rising from vents, cinematic lighting, painterly style, no people, empty scene"]
-<<<GENERATION_PROMPT_END>>>`,
-  },
-  {
-    id: 'extract_colors',
-    name: '提取色板',
-    icon: '🎨',
-    description: '分析图片的主色调和颜色构成',
-    category: 'analyze',
-    responseFormat: 'text',
-    prompt: `You are a color analysis expert. Analyze the provided image and extract its color palette.
+### 背景分析
+[详细描述背景场景，包括环境、光照、颜色、材质、氛围等]
 
-Identify:
-1. The dominant colors (top 5 colors with approximate hex codes)
-2. The overall color harmony (complementary, analogous, triadic, etc.)
-3. The mood/atmosphere conveyed by the color scheme
-4. Saturation and brightness characteristics
-
-Format your response as:
-**Color Palette**
-- Color 1: #[HEX] - [description] ([percentage]% of image)
-- Color 2: #[HEX] - [description] ([percentage]% of image)
-...
-
-**Color Harmony**: [type]
-**Mood**: [description]
-**Usage Recommendation**: [how these colors could be applied]`,
-  },
-  {
-    id: 'extract_style',
-    name: '提取风格',
-    icon: '🖼️',
-    description: '分析图片的艺术风格、技法和特征',
-    category: 'analyze',
-    responseFormat: 'text',
-    prompt: `You are an art analysis expert. Analyze the provided image and identify its style characteristics.
-
-Examine:
-1. Art style (realistic, anime, cartoon, painterly, etc.)
-2. Rendering technique (cel shading, watercolor, oil paint, digital, etc.)
-3. Line quality and weight
-4. Lighting style
-5. Color grading approach
-6. Key stylistic markers
-
-Format your response as:
-**Art Style**: [primary style classification]
-**Rendering**: [technique description]
-**Key Characteristics**:
-- [characteristic 1]
-- [characteristic 2]
-...
-
-**Style Prompt**: [a detailed prompt that could recreate this exact style]
-**Similar Artists/Sources**: [comparable styles or references]`,
-  },
-  {
-    id: 'extract_region',
-    name: '提取区域',
-    icon: '⬛',
-    description: '提取图片中的特定区域并进行高清放大',
-    category: 'extract',
-    responseFormat: 'image',
-    prompt: `You are an image processing assistant specializing in region zoom-in and enhancement.
-
-The user wants to extract a close-up detail from this image. Analyze the image and identify the most interesting focal area (usually the face, a key object, or the center of action).
-
-Step 1 — Describe: What is the main focal point? Describe it in precise visual detail.
-Step 2 — Compose: Write a prompt that recreates a zoomed-in close-up version of just that focal region, with high clarity and added detail.
-
-You MUST output your response in **exactly this two-section format**:
-
-**### Analysis**
-[Your analysis of the focal region]
-
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One paragraph close-up prompt describing only the focal region in high detail, including: subject close-up angle, fine details to enhance, style matching the original. Example: "extreme close-up of a young warrior's face, detailed eyes with golden irises, scar across left cheek, short brown hair, medieval leather collar, cinematic lighting, hyper-realistic detail, 8k"]
-<<<GENERATION_PROMPT_END>>>`,
-  },
-  {
-    id: 'extract_pixel_color',
-    name: '取色器',
-    icon: '💧',
-    description: '获取图片任意位置的精确颜色值',
-    category: 'analyze',
-    requiresPixelColor: true,
-    responseFormat: 'text',
-    prompt: `You are a color extraction assistant. The user has selected a specific pixel/area in the image.
-
-Provide the exact color information for that selected point:
-
-Format your response as:
-**Selected Color**
-- HEX: #[color]
-- RGB: rgb(r, g, b)  
-- HSL: hsl(h, s%, l%)
-- Named Color: [closest named color]
-
-**Color Context**
-[brief note about how this color is used in context of the image]`,
+### 生成提示词
+[创建一个详细的英文提示词，用于生成纯净的背景场景。提示词应包含：
+- 场景类型的完整描述
+- 光照和氛围关键词
+- 颜色描述
+- 明确声明"empty scene, no people, no characters, no foreground objects, no text"
+- "high detail, atmospheric lighting"
+]`,
   },
   {
     id: 'extract_objects',
     name: '提取物体',
     icon: '📦',
-    description: '识别并逐个提取图片中的所有物体',
+    description: '识别并提取图片中的所有物体，展示每个物体的三视图',
     category: 'extract',
-    responseFormat: 'text',
-    prompt: `You are an object detection assistant. Analyze the provided image and identify all distinct objects present.
+    responseFormat: 'multi-image',
+    multiImagePrompt: `你是一个专业的物体提取AI助手。
 
-For each object, describe:
-- What it is
-- Its position in the image (relative location)
-- Its visual characteristics (color, size, shape)
-- Any distinguishing details
+**任务**：识别图片中的所有物体，将它们分组（每组最多4个），并为每组生成一个提示词，用于创建这些物体的三视图。
 
-Format your response as a numbered list:
-1. **[Object Name]** - [position], [description]
-2. **[Object Name]** - [position], [description]
-...
+**严格要求**：
+1. 每张生成的图片最多包含4个物体
+2. 如果物体总数超过4个，需要分成多个组，每组生成一张图片
+3. 每个物体必须展示三视图：正面视图、侧面视图、背面视图（或3/4视角）
+4. 背景必须是纯白色 (#FFFFFF)，完全透明（PNG格式）
+5. 物体之间要有清晰的间距，不能重叠
+6. 不能有任何阴影、标签、文字或其他装饰元素
+7. 每个物体的三视图姿势/角度必须一致
 
-**Scene Composition**: [overall description of how objects relate to each other]`,
+**分析步骤**：
+1. 识别图片中的所有可区分的物体（忽略人物、角色，只关注道具、物品、道具等）
+2. 为每个物体记录：类型、颜色、形状、材质、尺寸估计、特殊特征
+3. 将物体分组，每组3-4个物体（如果物体较少，可以每组1-2个）
+4. 为每个分组创建一个提示词
+
+**输出格式**：
+
+### 物体分析
+[列出所有识别到的物体及其描述]
+
+### 分组方案
+[说明分组逻辑，例如：分组1: 物体A, 物体B, 物体C；分组2: 物体D, 物体E]
+
+### 生成提示词 - 分组1
+[创建英文提示词，用于生成分组1中物体的三视图。包含：
+- 所有物体的描述
+- "object reference sheet"或"orthographic views of multiple objects"
+- "front view, side view, back view for each object"
+- "arranged in a 2x2 grid"（如果4个物体）或"arranged horizontally"（如果少于4个）
+- "pure white background, transparent PNG"
+- "no shadows, no text, no decorations"
+- "high detail, clean design"
+]
+
+### 生成提示词 - 分组2
+[如果有多组，继续创建后续的提示词]`,
+    prompt: `你是物体提取助手。请分析图片中的所有物体并分组，每组最多4个物体。为每组创建三视图生成提示词。
+
+**输出格式**：
+
+### 物体分析
+[列出所有识别到的物体]
+
+### 分组方案
+[说明分组逻辑]
+
+### 生成提示词 - 分组1
+[英文提示词，用于生成该组物体的三视图]
+
+### 生成提示词 - 分组2
+[如果有多组，继续创建]`,
   },
   {
-    id: 'extract_text',
-    name: '提取文字',
-    icon: '📄',
-    description: 'OCR识别图片中的所有文字内容',
-    category: 'analyze',
+    id: 'extract_colors',
+    name: '提取颜色',
+    icon: '🎨',
+    description: '分析并提取图片的主色调和颜色构成',
+    category: 'tools',
     responseFormat: 'text',
-    prompt: `You are an OCR (Optical Character Recognition) assistant. Extract ALL text visible in the provided image.
+    prompt: `你是一个专业的颜色分析专家。
 
-For each text element found:
-- The exact text content
-- Its location in the image
-- The style of the text (font type, color, size relative to image)
-- The language detected
+**任务**：分析图片的主色调、颜色构成和色彩关系，提取完整的调色板。
 
-Format your response as:
-**Extracted Text**:
-1. "[text]" - [location], [style], [language]
-2. "[text]" - [location], [style], [language]
-...
+**分析内容**：
+1. 识别图片中的5-8种主要颜色
+2. 为每种颜色提供：
+   - 准确的HEX十六进制值
+   - RGB值
+   - 颜色名称（中英文）
+   - 在图片中的占比估计（百分比）
+   - 颜色描述（例如：温暖的橙色、深邃的蓝色）
+3. 分析颜色的整体和谐关系（互补色、类似色、三色等）
+4. 分析亮度和饱和度分布
+5. 评估颜色传达的情绪和氛围
 
-**Full Plain Text**:
-[all text concatenated in reading order]
+**输出格式**：
+请用以下格式输出（使用中文）：
 
-**Notes**: [any observations about text quality, readability issues, or context]`,
+### 主调色板
+
+| 颜色 | HEX | RGB | 名称 | 占比 | 描述 |
+|------|-----|-----|------|------|------|
+| [色块] | #XXXXXX | rgb(r,g,b) | 颜色名 | XX% | 描述 |
+
+### 色彩和谐
+- **和谐类型**：[互补色/类似色/三色/单色等]
+- **整体亮度**：[高/中/低]
+- **整体饱和度**：[高/中/低]
+- **色温**：[冷色调/暖色调/中性]
+
+### 情绪与氛围
+[描述这些颜色传达的情绪：平静、活力、神秘、温暖等]
+
+### 应用建议
+[建议这些颜色适合用于什么场景：角色设计、场景氛围、UI主题等]`,
   },
   {
     id: 'upscale',
     name: '无损放大',
     icon: '🔎',
     description: 'AI超分辨率增强图片细节，提升清晰度',
-    category: 'edit',
+    category: 'ai-tools',
     responseFormat: 'image',
-    prompt: `You are an image enhancement specialist. Analyze the provided image and produce a prompt that will recreate it at higher resolution with enhanced detail.
+    prompt: `你是一个专业的图像增强专家。
 
-Step 1 — Analyze: Describe the image composition, subject, art style, current detail level, and areas that could be sharpened/enhanced.
-Step 2 — Compose: Write a prompt that will recreate this exact image at higher resolution, with enhanced textures, finer detail, and sharp focus, while preserving the original subject, composition and style.
+**任务**：分析图片并生成一个提示词，用于创建该图片的高分辨率、增强细节版本。
 
-You MUST output your response in **exactly this two-section format**:
+**分析内容**：
+1. 主题和构图：主要主体、次要元素、构图平衡
+2. 艺术风格和渲染技术：写实、动漫、油画、水彩等
+3. 当前细节水平：纹理、光影、材质
+4. 可以增强的区域：模糊部分、低细节区域
 
-**### Analysis**
-[Your analysis including composition, style, and detail opportunities]
+**输出格式**：
+请用以下格式输出（使用中文）：
 
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One paragraph describing the SAME image as the original but emphasizing "ultra high resolution, 8k, highly detailed, sharp focus, masterwork quality" and specifying the exact same subject, pose, setting, colors, style as the source image. Must be faithful recreation, not a new image.]
-<<<GENERATION_PROMPT_END>>>`,
+### 图像分析
+[描述图片的主题、风格、当前质量]
+
+### 增强建议
+[列出可以改进的细节区域]
+
+### 生成提示词
+[创建一个详细的英文提示词，用于生成高分辨率版本。提示词应包含：
+- 原始图片的完整描述
+- "ultra high resolution, 8K, highly detailed"
+- "sharp focus, enhanced textures"
+- "maintain original style and composition"
+- "no artifacts, professional quality"
+]`,
   },
   {
-    id: 'describe_image',
-    name: '图片描述',
-    icon: '💬',
-    description: '生成详细的图片自然语言描述',
-    category: 'analyze',
-    responseFormat: 'text',
-    prompt: `You are an expert image captioner. Provide a comprehensive, natural language description of the provided image.
+    id: 'remove_watermark',
+    name: '去水印',
+    icon: '🧼',
+    description: '识别图片中的水印并生成去除方案',
+    category: 'ai-tools',
+    responseFormat: 'image',
+    prompt: `你是一个专业的图像修复专家。
 
-Cover:
-1. Main subject(s) and their appearance
-2. Scene/environment/context
-3. Lighting and atmosphere
-4. Colors and mood
-5. Artistic style and technical qualities
-6. Composition and framing
+**任务**：识别图片中的所有水印、文字叠加、Logo或不需要的标记，并生成一个提示词，用于创建完全去除这些标记的干净版本。
 
-Provide two descriptions:
-**Short Caption** (1 sentence):
-[concise description]
+**分析内容**：
+1. 检测图片中的所有标记：
+   - 类型（水印、Logo、文字、网站名称、版权标记等）
+   - 位置（坐标或相对位置）
+   - 大小和透明度
+   - 外观描述（颜色、字体、形状）
+2. 评估去除难度和对原图内容的影响
+3. 提供修复策略
 
-**Detailed Description** (3-5 sentences):
-[comprehensive description capturing all visual elements]
+**严格要求**：
+1. 生成的提示词必须完整描述原图内容，**排除所有水印和标记**
+2. 被水印遮挡的区域需要根据上下文合理重建
+3. 保持原图的艺术风格和画质
 
-**Keywords**: [comma-separated list of key tags]`,
+**输出格式**：
+请用以下格式输出（使用中文）：
+
+### 检测到的标记
+[列出所有发现的水印/标记及其位置和外观]
+
+### 修复策略
+[说明如何重建被遮挡的区域]
+
+### 生成提示词
+[创建一个详细的英文提示词，用于生成去除水印的版本。提示词应包含：
+- 原图内容的完整描述
+- 明确声明"no watermark, no logo, no text overlay, no copyright marks"
+- "clean image, pristine quality"
+- "seamless restoration of covered areas"
+]`,
   },
   {
     id: 'convert_style',
     name: '风格转换',
     icon: '🔄',
     description: '将图片转换为指定的艺术风格（默认转为吉卜力动画风格）',
-    category: 'edit',
+    category: 'ai-tools',
     responseFormat: 'image',
-    prompt: `You are a style transfer specialist. The user wants to convert this image into a different artistic style.
+    prompt: `你是一个专业的风格转换专家。
 
-Default conversion: **Studio Ghibli anime style** (Hayao Miyazaki style). If the image suggests a more appropriate target style, suggest alternatives.
+**任务**：分析图片并将其转换为不同的艺术风格。
 
-Step 1 — Analyze: Briefly describe the current style, subject, and composition of the image.
-Step 2 — Compose: Write a prompt that will recreate this same image's subject, pose, and composition but in Studio Ghibli anime style: hand-drawn 2D aesthetic, soft cel-shading, pastel sky gradients, lush green environments, expressive simple faces, dreamy warm lighting.
+**默认转换**：**吉卜力工作室动画风格**（宫崎骏风格）。包括：手绘2D美学、柔和的赛璐璐着色、粉彩天空渐变、茂密的绿色环境、富有表现力的简单面部、梦幻的温暖光照。
 
-You MUST output your response in **exactly this two-section format**:
+**分析内容**：
+1. 当前风格：艺术流派、渲染技术、线条质量
+2. 主题和构图：主要主体、场景、氛围
+3. 色彩调色板：主色、辅助色、强调色
+4. 光照和氛围：光源、阴影、情绪
 
-**### Analysis**
-[Your brief analysis of current style and subject]
+**目标风格特征（吉卜力风格）**：
+- 手绘2D外观，柔和的边缘
+- 赛璐璐着色风格（flat shading with subtle gradients）
+- 粉彩色调，柔和的天空
+- 茂密的自然环境细节
+- 富有表现力但简化的面部特征
+- 梦幻的温暖光照
+- 细腻的背景细节
 
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One paragraph describing the SAME subject and composition but explicitly in "Studio Ghibli style, Hayao Miyazaki anime, 2D hand-drawn, soft cel-shaded, pastel colors, dreamy warm lighting, detailed background, no 3D rendering, flat shading". Must preserve the original subject/scene.]
-<<<GENERATION_PROMPT_END>>>`,
-  },
-  {
-    id: 'remove_watermark',
-    name: '去水印',
-    icon: '🧼',
-    description: '识别图片中的水印并生成无水印版本',
-    category: 'edit',
-    responseFormat: 'image',
-    prompt: `You are an image restoration specialist. Analyze the provided image for any watermarks, logos, text overlays, stock photo marks, or unwanted stamps.
+**如果原图暗示其他更适合的目标风格，可以提供替代建议**。
 
-Step 1 — Detect: Identify all marks found — describe position, size, appearance, and opacity.
-Step 2 — Compose: Write a prompt that will recreate the image's content EXACTLY as it is, in the same style and composition, but completely free of any watermarks, logos, or text overlays — a clean version.
+**输出格式**：
+请用以下格式输出（使用中文）：
 
-You MUST output your response in **exactly this two-section format**:
+### 原图分析
+[简要描述当前风格、主题和构图]
 
-**### Analysis**
-[List the detected marks and the original image content to be preserved]
+### 风格转换要点
+[列出从原风格转换到目标风格的关键变化]
 
-**### Generation Prompt**
-<<<GENERATION_PROMPT_START>>>
-[One paragraph that describes the original image's content and style faithfully, ending with: "no watermark, no logo, no text overlay, completely clean image, pristine quality". Must preserve subject, composition, colors, style exactly.]
-<<<GENERATION_PROMPT_END>>>`,
+### 生成提示词
+[创建一个详细的英文提示词，用于生成吉卜力风格版本。提示词应包含：
+- 原始主题的完整描述
+- "Studio Ghibli style, Hayao Miyazaki anime"
+- "2D hand-drawn, soft cel-shaded"
+- "pastel colors, dreamy warm lighting"
+- "detailed background, lush nature"
+- "expressive simple faces"
+- "no 3D rendering, flat shading aesthetic"
+- 保持原始主题和构图的关键词
+]`,
   },
 ];
 

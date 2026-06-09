@@ -79,10 +79,12 @@ export interface ExtractTask {
   extractType?: string;
   resultText?: string;
   resultImage?: string;
+  resultImages?: string[];
   loading?: boolean;
   error?: string;
   timestamp: number;
   step?: 'analyzing' | 'generating';
+  groupTitles?: string[];
 }
 
 export interface ExtractConversation {

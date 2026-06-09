@@ -233,6 +233,7 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('');
   const [showAddToFavMenu, setShowAddToFavMenu] = useState<{ x: number; y: number; imageUrl: string; convId?: string; entryId?: string } | null>(null);
   const [pendingExtractFromImage, setPendingExtractFromImage] = useState<string | null>(null);
+  const [extractNotes, setExtractNotes] = useState<Record<string, string>>({});
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
   const mcpPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -808,12 +809,19 @@ export default function App() {
     const activeConv = extractConversations.find(c => c.id === activeExtractConvId);
     if (!activeConv) { setExtractLoading(false); return; }
 
+    // Get user notes for this category
+    const notes = extractNotes[tool.category]?.trim() || '';
+    const enhancedPrompt = notes
+      ? `${tool.prompt}\n\n【用户额外要求】\n${notes}`
+      : tool.prompt;
+
     const userTask: ExtractTask = {
       id: genId(),
       type: 'user',
       sourceImage: extractImage,
       extractType: toolId,
       timestamp: Date.now(),
+      resultText: notes || undefined,
     };
 
     const loadingTask: ExtractTask = {
@@ -850,7 +858,7 @@ export default function App() {
         apiUrl: llmApiUrl,
         apiKey: prov.apiKey,
         model: llmConfig.model,
-        prompt: tool.prompt,
+        prompt: enhancedPrompt,
         imageBase64,
       });
 
@@ -860,6 +868,102 @@ export default function App() {
       }
 
       const analysisText = llmResult.content;
+
+      // Handle multi-image generation (for extract_objects)
+      if (tool.responseFormat === 'multi-image') {
+        // Parse grouped prompts: "### 生成提示词 - 分组1", "### 生成提示词 - 分组2", etc.
+        const groupPrompts: string[] = [];
+        const groupTitles: string[] = [];
+        const groupRegex = /### 生成提示词 - 分组(\d+)\s*([\s\S]*?)(?=### 生成提示词 - 分组\d+|$)/g;
+        let match;
+        while ((match = groupRegex.exec(analysisText)) !== null) {
+          groupTitles.push(`分组${match[1]}`);
+          groupPrompts.push(match[2].trim());
+        }
+
+        if (groupPrompts.length === 0) {
+          // Fallback: try to extract single prompt
+          const promptMatch = analysisText.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
+          if (promptMatch && promptMatch[1]) {
+            groupPrompts.push(promptMatch[1].trim());
+            groupTitles.push('全部物体');
+          }
+        }
+
+        if (groupPrompts.length === 0) {
+          updateTask({ loading: false, error: '未能解析生成提示词', resultText: analysisText });
+          return;
+        }
+
+        // Extract display analysis (remove generation prompts from display)
+        const displayAnalysis = analysisText
+          .replace(/### 生成提示词 - 分组\d+[\s\S]*?$/gm, '')
+          .replace(/### 生成提示词[\s\S]*$/, '')
+          .trim();
+
+        updateTask({ 
+          resultText: displayAnalysis, 
+          step: 'generating',
+          groupTitles
+        });
+
+        // Generate images in parallel
+        const genApiUrl = prov.baseUrl;
+        const imageResults = await Promise.all(
+          groupPrompts.map(async (genPrompt, idx) => {
+            try {
+              const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+                prompt: genPrompt,
+                apiKey: prov.apiKey,
+                apiUrl: genApiUrl,
+                model,
+                size: '1024x1024',
+                n: 1,
+                referenceImages: [imageBase64],
+                responseFormat: 'b64_json',
+              });
+
+              if (genResult.error || !genResult.images?.[0]) {
+                return { 
+                  image: null, 
+                  error: genResult.error || `分组${idx + 1}生图失败`,
+                  groupIdx: idx 
+                };
+              }
+
+              return { image: genResult.images[0], error: null, groupIdx: idx };
+            } catch (err) {
+              return { image: null, error: String(err), groupIdx: idx };
+            }
+          })
+        );
+
+        const successImages = imageResults
+          .filter(r => r.image)
+          .map(r => r.image as string);
+        const failedCount = imageResults.filter(r => !r.image).length;
+
+        if (successImages.length === 0) {
+          updateTask({ 
+            loading: false, 
+            error: `所有分组生图失败`,
+            step: undefined 
+          });
+          return;
+        }
+
+        const errorText = failedCount > 0 
+          ? `\n\n⚠️ ${failedCount}个分组生图失败` 
+          : undefined;
+
+        updateTask({ 
+          loading: false, 
+          resultImages: successImages,
+          resultText: displayAnalysis + (errorText || ''),
+          step: undefined 
+        });
+        return;
+      }
 
       if (tool.responseFormat === 'image') {
         const promptMatch = analysisText.match(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/);
@@ -2201,6 +2305,22 @@ export default function App() {
                           </button>
                         ))}
                       </div>
+                      {(activeExtractCat === 'extract' || activeExtractCat === 'ai-tools') && (
+                        <div className="extract-notes-section">
+                          <label className="extract-notes-label">
+                            {activeExtractCat === 'extract' ? '📝 提取额外要求' : '📝 AI工具额外要求'}
+                          </label>
+                          <textarea
+                            className="extract-notes-input"
+                            placeholder={activeExtractCat === 'extract' 
+                              ? '输入额外的提取要求或约束（例如：特定细节强调、输出格式要求等）' 
+                              : '输入额外的处理要求（例如：强度调整、风格偏好等）'}
+                            value={extractNotes[activeExtractCat] || ''}
+                            onChange={(e) => setExtractNotes(prev => ({ ...prev, [activeExtractCat]: e.target.value }))}
+                            rows={3}
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="extract-results-panel">
@@ -2314,6 +2434,63 @@ export default function App() {
                                       收藏
                                     </button>
                                   </div>
+                                </div>
+                              )}
+                              {task.resultImages && task.resultImages.length > 0 && (
+                                <div className="extract-result-images-container">
+                                  {task.resultImages.map((img, idx) => (
+                                    <div key={idx} className="extract-result-image-group">
+                                      <div className="extract-result-label">
+                                        {task.groupTitles?.[idx] || `分组${idx + 1}`}
+                                      </div>
+                                      <div
+                                        className="extract-result-image"
+                                        onContextMenu={e => openContextMenu(e, img)}
+                                        onClick={() => setLightboxSrc(img)}
+                                      >
+                                        <LocalImage
+                                          src={img}
+                                          alt={`分组${idx + 1}结果`}
+                                          style={{ cursor: 'zoom-in', width: '100%', borderRadius: 8 }}
+                                        />
+                                      </div>
+                                      <div className="extract-result-image-actions">
+                                        <button
+                                          className="extract-img-action-btn"
+                                          onClick={() => handleCopyImage(img)}
+                                          title="复制图片"
+                                        >
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                          </svg>
+                                          复制
+                                        </button>
+                                        <button
+                                          className="extract-img-action-btn"
+                                          onClick={() => handleExtractFromContextMenu(img)}
+                                          title="继续提取"
+                                        >
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                                          </svg>
+                                          继续处理
+                                        </button>
+                                        <button
+                                          className="extract-img-action-btn"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowAddToFavMenu({ x: e.clientX, y: e.clientY, imageUrl: img });
+                                          }}
+                                          title="收藏"
+                                        >
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                                          </svg>
+                                          收藏
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
                               )}
                             </div>
