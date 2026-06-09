@@ -735,6 +735,9 @@ fn delete_conversation(
     if let (Some(src), Some(dst)) = (conv_dir(&app, &conversation_id), trash_dir(&app, &conversation_id)) {
         if src.exists() {
             let _ = fs::create_dir_all(dst.parent().unwrap());
+            if dst.exists() {
+                let _ = fs::remove_dir_all(&dst);
+            }
             let _ = fs::rename(&src, &dst);
             let meta = TrashMeta { moved_at: now_ms() };
             if let Ok(json) = serde_json::to_string(&meta) {
