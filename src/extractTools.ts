@@ -36,11 +36,14 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 6. 不能有任何阴影投射到地面上
 7. 不能有环境光效或氛围光
 8. 画面中不能出现任何文字、标签、标注
+9. **艺术风格必须与原图完全一致**：如果原图是写实风格，则三视图也必须是写实风格；如果原图是动漫/卡通/油画/水彩风格，则三视图必须采用相同风格
 
 **分析步骤**：
 1. 仔细观察图片，识别主要人物/角色
-2. 详细记录：服装（颜色、款式、材质、配饰）、发型和发色、面部特征、体型比例、姿态、任何显著特征（疤痕、纹身、特殊装饰等）
-3. 注意角色的整体风格和艺术风格
+2. **识别原图的艺术风格**：写实、照片级、卡通、动漫、像素、油画、水彩、赛璐璐等
+3. 详细记录：服装（颜色、款式、材质、配饰）、发型和发色、面部特征、体型比例、姿态、任何显著特征（疤痕、纹身、特殊装饰等）
+4. 注意角色的整体风格和艺术风格
+5. 观察颜色调色板、线条风格、渲染技术
 
 **输出格式**：
 请用以下格式输出（使用中文）：
@@ -48,16 +51,29 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 ### 角色分析
 [详细描述角色的外貌特征，包括服装、发型、面部、体型、姿态等]
 
-### 生成提示词
-[创建一个详细的英文提示词，用于生成该角色的三视图。提示词应包含：
-- 角色外形的完整描述
-- "character reference sheet"或"orthographic views"关键词
-- "front view, side view, 3/4 view"或"front view, side view, back view, 3/4 view"
-- "pure white background"
-- "consistent pose"
-- "high detail, professional character design"
+### 原图艺术风格
+[准确描述原图的艺术风格，例如：日系动漫风格（anime/manga style）、美式卡通、写实摄影、3D渲染、像素艺术、水墨画、赛璐璐着色等]
+
+### 生成提示词 - 三视图
+[一个详细的英文提示词，用于生成该角色的三视图。必须包含：
+- 角色完整的外貌描述（服装、发型、发色、面部特征、体型、姿态、显著特征）
+- "character reference sheet, orthographic views"
+- "front view, side view, back view, 3/4 view"
+- "pure white background, no shadows, no ground shadows"
 - "PNG format with transparent background"
-- 明确声明"NO other objects, NO props, NO decorations, NO background elements"
+- "NO props, NO weapons, NO accessories, NO background elements, NO objects"
+- **明确指定原图的艺术风格**（例如：in the exact same anime/manga art style as the reference image）
+- 使用与参考图完全相同的渲染技术和线条风格
+]
+
+### 生成提示词 - 角色立绘
+[一个详细的英文提示词，用于生成该角色的正面站立肖像/立绘图。必须包含：
+- 角色完整的外貌描述
+- "character portrait, full body standing pose"
+- "front view, facing camera"
+- "pure white background, no shadows"
+- "PNG format with transparent background"
+- **明确指定原图的艺术风格**（与参考图完全一致）
 ]`,
   },
   {
@@ -76,11 +92,13 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 2. 背景应该是完整的场景，包括远处的环境、天空、光照、颜色、纹理和氛围元素
 3. 如果原图中有被前景物体遮挡的背景区域，需要根据上下文合理补全
 4. 保持原图的艺术风格和氛围
+5. **艺术风格必须与原图完全一致**
 
 **分析步骤**：
 1. 识别并忽略所有前景元素（人物、角色、近景物体、文字等）
-2. 详细描述背景场景：环境类型（室内/室外、地点）、时间（白天/夜晚）、光照条件和方向、颜色调色板、材质和纹理、氛围（平静、神秘、壮丽等）
-3. 注意背景中的细节：远处的建筑、植被、天空、光影效果等
+2. **识别原图的艺术风格**
+3. 详细描述背景场景：环境类型（室内/室外、地点）、时间（白天/夜晚）、光照条件和方向、颜色调色板、材质和纹理、氛围（平静、神秘、壮丽等）
+4. 注意背景中的细节：远处的建筑、植被、天空、光影效果等
 
 **输出格式**：
 请用以下格式输出（使用中文）：
@@ -88,77 +106,119 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 ### 背景分析
 [详细描述背景场景，包括环境、光照、颜色、材质、氛围等]
 
-### 生成提示词
-[创建一个详细的英文提示词，用于生成纯净的背景场景。提示词应包含：
+### 原图艺术风格
+[准确描述原图的艺术风格]
+
+### 生成提示词 - 纯净背景
+[创建一个详细的英文提示词，用于生成纯净的背景场景。必须包含：
 - 场景类型的完整描述
 - 光照和氛围关键词
 - 颜色描述
-- 明确声明"empty scene, no people, no characters, no foreground objects, no text"
+- "empty scene, no people, no characters, no foreground objects, no text, no UI elements"
 - "high detail, atmospheric lighting"
+- **明确指定原图的艺术风格**（与参考图完全一致）
+- "panoramic view, wide angle, showing the full background environment"
 ]`,
   },
   {
     id: 'extract_objects',
     name: '提取物体',
     icon: '📦',
-    description: '识别并提取图片中的所有物体，展示每个物体的三视图',
+    description: '识别图片中的所有物体（排除人物和场景），每4个物体生成一张三视图',
     category: 'extract',
     responseFormat: 'multi-image',
     multiImagePrompt: `你是一个专业的物体提取AI助手。
 
-**任务**：识别图片中的所有物体，将它们分组（每组最多4个），并为每组生成一个提示词，用于创建这些物体的三视图。
+**任务**：分析图片中的所有非生命物体，将它们分组（每组最多4个），为每组生成一张展示三视图的参考图。
 
 **严格要求**：
-1. 每张生成的图片最多包含4个物体
-2. 如果物体总数超过4个，需要分成多个组，每组生成一张图片
-3. 每个物体必须展示三视图：正面视图、侧面视图、背面视图（或3/4视角）
-4. 背景必须是纯白色 (#FFFFFF)，完全透明（PNG格式）
-5. 物体之间要有清晰的间距，不能重叠
-6. 不能有任何阴影、标签、文字或其他装饰元素
-7. 每个物体的三视图姿势/角度必须一致
+1. **只提取物体**：绝对不提取人物、角色、人物面部、人体部位
+2. **不提取场景**：不提取背景、天空、地面、建筑外墙等大环境元素
+3. **只提取独立的非生命物体**：例如道具、武器、工具、家具、车辆部件、电子设备、装饰品、食物、衣物（作为独立物品时）、书籍、瓶子等
+4. 每张生成的图片最多包含4个物体
+5. 如果物体总数超过4个，需要分成多个组，每组生成一张图片
+6. 每个物体必须展示三视图：正面视图、侧面视图、顶部/背面视图
+7. 背景必须是纯白色 (#FFFFFF)，PNG格式完全透明
+8. 物体之间要有清晰的间距，不能重叠
+9. 不能有任何阴影、标签、文字或其他装饰元素
+10. **保持与原图完全一致的艺术风格**
 
 **分析步骤**：
-1. 识别图片中的所有可区分的物体（忽略人物、角色，只关注道具、物品、道具等）
-2. 为每个物体记录：类型、颜色、形状、材质、尺寸估计、特殊特征
-3. 将物体分组，每组3-4个物体（如果物体较少，可以每组1-2个）
-4. 为每个分组创建一个提示词
+1. **首先过滤**：识别图片中的元素，删除所有人物/角色/场景背景
+2. 列出剩余的所有非生命物体，描述每个物体的特征
+3. 将物体按4个一组进行分组（最后一组可以是1-4个）
+4. 为每个分组创建一个生成提示词
 
 **输出格式**：
+请用以下格式输出（使用中文）：
 
-### 物体分析
-[列出所有识别到的物体及其描述]
+### 原始元素过滤
+[列出图片中的所有元素，并说明哪些被保留（物体）、哪些被排除（人物/场景）]
+
+### 物体列表
+[列出所有识别到的非生命物体及其描述，编号1, 2, 3...]
 
 ### 分组方案
-[说明分组逻辑，例如：分组1: 物体A, 物体B, 物体C；分组2: 物体D, 物体E]
+[说明分组逻辑，例如：
+- 分组1: #物体A, #物体B, #物体C, #物体D
+- 分组2: #物体E, #物体F, #物体G, #物体H
+- 分组3: #物体I, #物体J]
 
 ### 生成提示词 - 分组1
-[创建英文提示词，用于生成分组1中物体的三视图。包含：
-- 所有物体的描述
-- "object reference sheet"或"orthographic views of multiple objects"
-- "front view, side view, back view for each object"
-- "arranged in a 2x2 grid"（如果4个物体）或"arranged horizontally"（如果少于4个）
+[创建详细的英文提示词，包含：
+- 分组中所有4个物体的详细描述（基于原图识别的特征）
+- "object reference sheet with orthographic views, 4 separate objects arranged in a 2x2 grid layout"
+- "each object shown with front view, side view, back view"
+- "same art style as reference image"（明确指定原图艺术风格的具体名称）
 - "pure white background, transparent PNG"
-- "no shadows, no text, no decorations"
-- "high detail, clean design"
+- "NO characters, NO people, NO background elements, NO shadows, NO text, NO labels"
+- "clean separation between each object, no overlapping"
+- "high detail, professional object design"
 ]
 
 ### 生成提示词 - 分组2
-[如果有多组，继续创建后续的提示词]`,
-    prompt: `你是物体提取助手。请分析图片中的所有物体并分组，每组最多4个物体。为每组创建三视图生成提示词。
+[继续为后续分组创建提示词]
+
+### 生成提示词 - 分组N
+[...]`,
+    prompt: `你是一个专业的物体提取AI助手。
+
+**任务**：分析图片中的所有非生命物体，将它们分组（每组最多4个），为每组生成一张展示三视图的参考图。
+
+**严格要求**：
+1. **只提取非生命物体**：绝对不提取人物、角色、人物面部、人体部位
+2. **不提取场景**：不提取背景、天空、地面、建筑外墙等大环境元素
+3. **可提取的物体类型**：道具、武器、工具、家具、车辆、电子设备、装饰品、食物、衣物（作为独立物品）、书籍、瓶子、植物（单独的花、树）、建筑部件（门、窗）等
+4. 每个分组最多4个物体
+5. 每张图展示4个物体的三视图排列列为2x2网格
+6. 保持与原图完全一致的艺术风格
+
+**分析步骤**：
+1. 识别图片中的所有元素，过滤掉人物和场景
+2. 列出所有独立的非生命物体
+3. 按4个一组进行分组
+4. 为每个分组创建提示词
 
 **输出格式**：
+请用以下格式输出（使用中文）：
 
-### 物体分析
-[列出所有识别到的物体]
+### 原始元素过滤
+[说明保留了哪些物体，排除了哪些人物/场景]
+
+### 物体列表
+[列出所有识别到的物体及描述，编号]
 
 ### 分组方案
-[说明分组逻辑]
+[明确说明每个分组包含哪些物体]
 
 ### 生成提示词 - 分组1
-[英文提示词，用于生成该组物体的三视图]
+[详细英文提示词，用于生成该分组的三视图参考图]
 
 ### 生成提示词 - 分组2
-[如果有多组，继续创建]`,
+[下一分组的提示词]
+
+### 生成提示词 - 分组N
+[如有更多分组]`,
   },
   {
     id: 'extract_colors',
@@ -215,6 +275,11 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 
 **任务**：分析图片并生成一个提示词，用于创建该图片的高分辨率、增强细节版本。
 
+**严格要求**：
+1. 生成的图片必须与原图**内容、构图、颜色、风格完全一致**
+2. 只是提高分辨率和细节，不能改变原图的任何元素
+3. 保持原图的艺术风格（写实、动漫、油画等）
+
 **分析内容**：
 1. 主题和构图：主要主体、次要元素、构图平衡
 2. 艺术风格和渲染技术：写实、动漫、油画、水彩等
@@ -231,11 +296,13 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
 [列出可以改进的细节区域]
 
 ### 生成提示词
-[创建一个详细的英文提示词，用于生成高分辨率版本。提示词应包含：
-- 原始图片的完整描述
+[创建一个详细的英文提示词，用于生成高分辨率版本。必须包含：
+- 原始图片的完整描述（主题、人物、场景、细节）
+- 明确指定与原图完全相同的艺术风格
 - "ultra high resolution, 8K, highly detailed"
 - "sharp focus, enhanced textures"
-- "maintain original style and composition"
+- "same composition, same colors, same style as reference image"
+- "maintain original art style exactly"
 - "no artifacts, professional quality"
 ]`,
   },

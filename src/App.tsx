@@ -761,16 +761,17 @@ export default function App() {
     setExtractImage(imageUrl);
     setExtractError(null);
     const id = genId();
+    const now = Date.now();
+    const title = `提取 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
     const newConv: ExtractConversation = {
       id,
-      title: `提取 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+      title,
       sourceImage: imageUrl,
       tasks: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
     };
-    const updated = [newConv, ...extractConversations];
-    setExtractConversations(updated);
+    setExtractConversations(prev => [newConv, ...prev]);
     setActiveExtractConvId(id);
   };
 
@@ -782,12 +783,15 @@ export default function App() {
   }, [pendingExtractFromImage]);
 
   const deleteExtractConv = (id: string) => {
-    const updated = extractConversations.filter(c => c.id !== id);
-    setExtractConversations(updated);
-    if (activeExtractConvId === id) {
-      setActiveExtractConvId(updated[0]?.id || null);
-      setExtractImage(updated[0]?.sourceImage || null);
-    }
+    setExtractConversations(prev => {
+      const updated = prev.filter(c => c.id !== id);
+      if (activeExtractConvId === id) {
+        const next = updated[0];
+        setActiveExtractConvId(next?.id || null);
+        setExtractImage(next?.sourceImage || null);
+      }
+      return updated;
+    });
   };
 
   const switchExtractConv = (id: string) => {
@@ -799,9 +803,7 @@ export default function App() {
     }
   };
 
-  const runExtractTool = async (toolId: string) => {
-    const convId = activeExtractConvId;
-    const image = extractImage;
+  const runExtractTool = async (toolId: string, convId: string, image: string) => {
     if (!image || !convId || extractLoadingConvs.has(convId)) return;
     const tool = getToolById(toolId);
     if (!tool) return;
@@ -812,18 +814,12 @@ export default function App() {
       return;
     }
 
-    setExtractLoadingConvs(prev => new Set(prev).add(convId));
+    setExtractLoadingConvs(prev => {
+      const next = new Set(prev);
+      next.add(convId);
+      return next;
+    });
     setExtractError(null);
-
-    const activeConv = extractConversations.find(c => c.id === convId);
-    if (!activeConv) { 
-      setExtractLoadingConvs(prev => { 
-        const next = new Set(prev); 
-        next.delete(convId); 
-        return next; 
-      }); 
-      return; 
-    }
 
     // Get user notes for this category
     const notes = extractNotes[tool.category]?.trim() || '';
@@ -831,37 +827,51 @@ export default function App() {
       ? `${tool.prompt}\n\n【用户额外要求】\n${notes}`
       : tool.prompt;
 
+    const userTaskId = genId();
+    const loadingTaskId = genId();
+    const now = Date.now();
     const userTask: ExtractTask = {
-      id: genId(),
+      id: userTaskId,
       type: 'user',
       sourceImage: image,
       extractType: toolId,
-      timestamp: Date.now(),
+      timestamp: now,
       resultText: notes || undefined,
     };
-
     const loadingTask: ExtractTask = {
-      id: genId(),
+      id: loadingTaskId,
       type: 'assistant',
       sourceImage: image,
       extractType: toolId,
       loading: true,
       step: 'analyzing',
-      timestamp: Date.now(),
+      timestamp: now,
     };
 
-    let currentTasks = [...activeConv.tasks, userTask, loadingTask];
-    let currentConvs = extractConversations.map(c =>
-      c.id === convId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
-    );
-    setExtractConversations(currentConvs);
+    // Use functional update to append user + loading task, get latest list
+    let latestConv: ExtractConversation | undefined;
+    setExtractConversations(prev => {
+      return prev.map(c => {
+        if (c.id !== convId) return c;
+        latestConv = {
+          ...c,
+          tasks: [...c.tasks, userTask, loadingTask],
+          updatedAt: now,
+        };
+        return latestConv;
+      });
+    });
 
+    // Helper to update the specific loading task
     const updateTask = (updates: Partial<ExtractTask>) => {
-      currentTasks = currentTasks.map(t => t.id === loadingTask.id ? { ...t, ...updates } : t);
-      currentConvs = currentConvs.map(c =>
-        c.id === convId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
-      );
-      setExtractConversations(currentConvs);
+      setExtractConversations(prev => prev.map(c => {
+        if (c.id !== convId) return c;
+        return {
+          ...c,
+          tasks: c.tasks.map(t => t.id === loadingTaskId ? { ...t, ...updates } : t),
+          updatedAt: Date.now(),
+        };
+      }));
     };
 
     try {
@@ -898,7 +908,6 @@ export default function App() {
         }
 
         if (groupPrompts.length === 0) {
-          // Fallback: try to extract single prompt
           const promptMatch = analysisText.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
           if (promptMatch && promptMatch[1]) {
             groupPrompts.push(promptMatch[1].trim());
@@ -911,7 +920,6 @@ export default function App() {
           return;
         }
 
-        // Extract display analysis (remove generation prompts from display)
         const displayAnalysis = analysisText
           .replace(/### 生成提示词 - 分组\d+[\s\S]*?$/gm, '')
           .replace(/### 生成提示词[\s\S]*$/, '')
@@ -923,7 +931,6 @@ export default function App() {
           groupTitles
         });
 
-        // Generate images in parallel
         const genApiUrl = prov.baseUrl;
         const imageResults = await Promise.all(
           groupPrompts.map(async (genPrompt, idx) => {
@@ -982,11 +989,34 @@ export default function App() {
       }
 
       if (tool.responseFormat === 'image') {
-        const promptMatch = analysisText.match(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/);
-        const generationPrompt = promptMatch ? promptMatch[1].trim() : analysisText;
-        const displayAnalysis = promptMatch
-          ? analysisText.replace(/<<<GENERATION_PROMPT_START>>>[\s\S]*?<<<GENERATION_PROMPT_END>>>/, '').trim()
-          : analysisText;
+        // Look for explicit generation prompt markers, or fallback to extracting
+        // the ### 生成提示词 section, or last-resort use the entire analysis
+        const markerMatch = analysisText.match(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/);
+        let generationPrompt: string;
+        let displayAnalysis: string;
+        
+        if (markerMatch) {
+          generationPrompt = markerMatch[1].trim();
+          displayAnalysis = analysisText
+            .replace(/<<<GENERATION_PROMPT_START>>>[\s\S]*?<<<GENERATION_PROMPT_END>>>/, '')
+            .trim();
+        } else {
+          const sectionMatch = analysisText.match(/([\s\S]*?)###\s*生成提示词\s*([\s\S]*)$/m);
+          if (sectionMatch) {
+            displayAnalysis = sectionMatch[1].trim();
+            generationPrompt = sectionMatch[2].trim();
+          } else {
+            displayAnalysis = '';
+            generationPrompt = analysisText;
+          }
+        }
+
+        // Ensure generation prompt references the original style
+        if (!generationPrompt.toLowerCase().includes('same') && 
+            !generationPrompt.toLowerCase().includes('style') &&
+            !generationPrompt.toLowerCase().includes('match')) {
+          generationPrompt += ', in the exact same art style as the reference image';
+        }
 
         updateTask({ resultText: displayAnalysis, step: 'generating' });
 
@@ -2316,7 +2346,7 @@ export default function App() {
                           <button
                             key={tool.id}
                             className="extract-tool-btn"
-                            onClick={() => runExtractTool(tool.id)}
+                            onClick={() => activeExtractConvId && extractImage && runExtractTool(tool.id, activeExtractConvId, extractImage)}
                             disabled={(activeExtractConvId && extractLoadingConvs.has(activeExtractConvId)) || !extractImage}
                             title={tool.description}
                           >
