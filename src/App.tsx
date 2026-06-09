@@ -1063,8 +1063,15 @@ export default function App() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      setExtractImage(reader.result as string);
-      setExtractError(null);
+      const imageDataUrl = reader.result as string;
+      // 如果没有活动会话，自动创建
+      if (!activeExtractConvId) {
+        openExtractFromImage(imageDataUrl);
+      } else {
+        // 已有会话，仅更新图片
+        setExtractImage(imageDataUrl);
+        setExtractError(null);
+      }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -1501,8 +1508,12 @@ export default function App() {
         reader.onload = (ev) => {
           const dataUrl = ev.target?.result as string;
           if (sidebarCategory === 'extract') {
-            setExtractImage(dataUrl);
-            setExtractError(null);
+            if (!activeExtractConvId) {
+              openExtractFromImage(dataUrl);
+            } else {
+              setExtractImage(dataUrl);
+              setExtractError(null);
+            }
           } else {
             setPastedImages(prev => prev.length < 6 ? [...prev, dataUrl] : prev);
           }
@@ -2346,7 +2357,30 @@ export default function App() {
                           <button
                             key={tool.id}
                             className="extract-tool-btn"
-                            onClick={() => activeExtractConvId && extractImage && runExtractTool(tool.id, activeExtractConvId, extractImage)}
+                            onClick={() => {
+                              const convId = activeExtractConvId;
+                              const img = extractImage;
+                              if (!img) return;
+                              if (convId && !extractLoadingConvs.has(convId)) {
+                                runExtractTool(tool.id, convId, img);
+                              } else if (!convId) {
+                                // 兜底：没有会话时自动创建
+                                const id = genId();
+                                const now = Date.now();
+                                const newConv: ExtractConversation = {
+                                  id,
+                                  title: `提取 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+                                  sourceImage: img,
+                                  tasks: [],
+                                  createdAt: now,
+                                  updatedAt: now,
+                                };
+                                setExtractConversations(prev => [newConv, ...prev]);
+                                setActiveExtractConvId(id);
+                                // 延迟执行，等 state 更新
+                                setTimeout(() => runExtractTool(tool.id, id, img), 50);
+                              }
+                            }}
                             disabled={(activeExtractConvId && extractLoadingConvs.has(activeExtractConvId)) || !extractImage}
                             title={tool.description}
                           >
