@@ -231,7 +231,7 @@ export default function App() {
   const [editingFavoriteName, setEditingFavoriteName] = useState('');
   const [showAddFolder, setShowAddFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
-  const [_showAddToFavMenu, setShowAddToFavMenu] = useState<{ x: number; y: number; imageUrl: string; convId?: string; entryId?: string } | null>(null);
+  const [showAddToFavMenu, setShowAddToFavMenu] = useState<{ x: number; y: number; imageUrl: string; convId?: string; entryId?: string } | null>(null);
   const [pendingExtractFromImage, setPendingExtractFromImage] = useState<string | null>(null);
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
@@ -822,50 +822,83 @@ export default function App() {
       sourceImage: extractImage,
       extractType: toolId,
       loading: true,
+      step: 'analyzing',
       timestamp: Date.now(),
     };
 
-    const updatedTasks = [...activeConv.tasks, userTask, loadingTask];
-    const updatedConvs = extractConversations.map(c =>
-      c.id === activeExtractConvId ? { ...c, tasks: updatedTasks, updatedAt: Date.now() } : c
+    let currentTasks = [...activeConv.tasks, userTask, loadingTask];
+    let currentConvs = extractConversations.map(c =>
+      c.id === activeExtractConvId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
     );
-    setExtractConversations(updatedConvs);
+    setExtractConversations(currentConvs);
+
+    const updateTask = (updates: Partial<ExtractTask>) => {
+      currentTasks = currentTasks.map(t => t.id === loadingTask.id ? { ...t, ...updates } : t);
+      currentConvs = currentConvs.map(c =>
+        c.id === activeExtractConvId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
+      );
+      setExtractConversations(currentConvs);
+    };
 
     try {
+      const imageBase64 = extractImage.startsWith('data:')
+        ? extractImage
+        : await invoke<string>('read_image_base64', { path: extractImage });
+
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
-      const result = await invoke<{ content: string; error: string | null }>('llm_chat', {
+      const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
         apiUrl: llmApiUrl,
         apiKey: prov.apiKey,
         model: llmConfig.model,
         prompt: tool.prompt,
-        imageBase64: extractImage.startsWith('data:') ? extractImage : await invoke<string>('read_image_base64', { path: extractImage }),
+        imageBase64,
       });
 
-      if (result.error) {
-        const finalTasks = updatedTasks.map(t =>
-          t.id === loadingTask.id ? { ...t, loading: false, error: result.error! } : t
-        );
-        const finalConvs = updatedConvs.map(c =>
-          c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
-        );
-        setExtractConversations(finalConvs);
+      if (llmResult.error) {
+        updateTask({ loading: false, error: llmResult.error });
+        return;
+      }
+
+      const analysisText = llmResult.content;
+
+      if (tool.responseFormat === 'image') {
+        const promptMatch = analysisText.match(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/);
+        const generationPrompt = promptMatch ? promptMatch[1].trim() : analysisText;
+        const displayAnalysis = promptMatch
+          ? analysisText.replace(/<<<GENERATION_PROMPT_START>>>[\s\S]*?<<<GENERATION_PROMPT_END>>>/, '').trim()
+          : analysisText;
+
+        updateTask({ resultText: displayAnalysis, step: 'generating' });
+
+        const genApiUrl = prov.baseUrl;
+        const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+          prompt: generationPrompt,
+          apiKey: prov.apiKey,
+          apiUrl: genApiUrl,
+          model,
+          size: '1024x1024',
+          n: 1,
+          referenceImages: [imageBase64],
+          responseFormat: 'b64_json',
+        });
+
+        if (genResult.error) {
+          updateTask({ loading: false, error: `生图失败: ${genResult.error}` });
+          return;
+        }
+
+        const resultImage = genResult.images?.[0];
+        if (!resultImage) {
+          updateTask({ loading: false, error: '生图未返回图片' });
+          return;
+        }
+
+        updateTask({ loading: false, resultImage, step: undefined });
       } else {
-        const finalTasks = updatedTasks.map(t =>
-          t.id === loadingTask.id ? { ...t, loading: false, resultText: result.content } : t
-        );
-        const finalConvs = updatedConvs.map(c =>
-          c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
-        );
-        setExtractConversations(finalConvs);
+        updateTask({ loading: false, resultText: analysisText, step: undefined });
       }
     } catch (err) {
-      const finalTasks = updatedTasks.map(t =>
-        t.id === loadingTask.id ? { ...t, loading: false, error: String(err) } : t
-      );
-      const finalConvs = updatedConvs.map(c =>
-        c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
-      );
-      setExtractConversations(finalConvs);
+      updateTask({ loading: false, error: String(err), step: undefined });
     } finally {
       setExtractLoading(false);
     }
@@ -2191,7 +2224,20 @@ export default function App() {
                               {task.loading && (
                                 <div className="loading-container">
                                   <div className="loading-spinner" />
-                                  <span className="loading-text">正在分析...</span>
+                                  <span className="loading-text">
+                                    {task.step === 'generating'
+                                      ? 'LLM 已优化提示词，正在生成图片...'
+                                      : 'LLM 正在分析图片并优化提示词...'}
+                                  </span>
+                                  <div className="extract-step-indicator">
+                                    <span className={task.step === 'analyzing' ? 'extract-step active' : 'extract-step done'}>
+                                      {task.step === 'analyzing' ? '●' : '✓'} 分析
+                                    </span>
+                                    <span className="extract-step-arrow">→</span>
+                                    <span className={`extract-step ${task.step === 'generating' ? 'active' : 'pending'}`}>
+                                      {task.step === 'generating' ? '●' : '○'} 生图
+                                    </span>
+                                  </div>
                                 </div>
                               )}
                               {task.error && (
@@ -2205,14 +2251,69 @@ export default function App() {
                               {task.resultText && (
                                 <div className="extract-result-text">
                                   {task.resultText.split('\n').map((line, i) => (
-                                    line.startsWith('**') && line.endsWith('**') ? (
+                                    line.startsWith('**### ') ? (
+                                      <h3 key={i} className="extract-result-section">{line.replace(/\*\*/g, '').replace('### ', '')}</h3>
+                                    ) : line.startsWith('**') && line.endsWith('**') ? (
                                       <h4 key={i} className="extract-result-heading">{line.replace(/\*\*/g, '')}</h4>
                                     ) : line.startsWith('- ') ? (
                                       <li key={i} className="extract-result-item">{line.slice(2)}</li>
+                                    ) : line.startsWith('1. ') || line.startsWith('2. ') || line.match(/^\d+\. /) ? (
+                                      <li key={i} className="extract-result-item">{line}</li>
                                     ) : line.trim() ? (
                                       <p key={i} className="extract-result-para">{line}</p>
                                     ) : <br key={i} />
                                   ))}
+                                </div>
+                              )}
+                              {task.resultImage && (
+                                <div className="extract-result-image-container">
+                                  <div className="extract-result-label">生成结果</div>
+                                  <div
+                                    className="extract-result-image"
+                                    onContextMenu={e => openContextMenu(e, task.resultImage!)}
+                                    onClick={() => setLightboxSrc(task.resultImage!)}
+                                  >
+                                    <LocalImage
+                                      src={task.resultImage}
+                                      alt="提取结果"
+                                      style={{ cursor: 'zoom-in', width: '100%', borderRadius: 8 }}
+                                    />
+                                  </div>
+                                  <div className="extract-result-image-actions">
+                                    <button
+                                      className="extract-img-action-btn"
+                                      onClick={() => handleCopyImage(task.resultImage!)}
+                                      title="复制图片"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                      </svg>
+                                      复制
+                                    </button>
+                                    <button
+                                      className="extract-img-action-btn"
+                                      onClick={() => handleExtractFromContextMenu(task.resultImage!)}
+                                      title="继续提取"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                                      </svg>
+                                      继续处理
+                                    </button>
+                                    <button
+                                      className="extract-img-action-btn"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setShowAddToFavMenu({ x: e.clientX, y: e.clientY, imageUrl: task.resultImage! });
+                                      }}
+                                      title="收藏"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                                      </svg>
+                                      收藏
+                                    </button>
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -3429,6 +3530,28 @@ export default function App() {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Add to Favorites Popup ──────────────────────────────────────── */}
+      {showAddToFavMenu && (
+        <div
+          className="context-menu"
+          style={{ left: showAddToFavMenu.x, top: showAddToFavMenu.y }}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="context-menu-item context-menu-parent-item" style={{ cursor: 'default', fontWeight: 600, color: 'var(--text-secondary)' }}>
+            收藏到
+          </div>
+          {favoriteFolders.map(folder => (
+            <button
+              key={folder.id}
+              className="context-menu-item"
+              onClick={() => handleAddFavorite(showAddToFavMenu.imageUrl, folder.id, showAddToFavMenu.convId, showAddToFavMenu.entryId)}
+            >
+              {folder.icon || '📁'} {folder.name}
+            </button>
+          ))}
         </div>
       )}
 

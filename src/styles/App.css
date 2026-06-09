@@ -3017,6 +3017,107 @@
 
 /* ── Extract Page ───────────────────────────────────────────────────────── */
 
+.extract-step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+.extract-step {
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+
+.extract-step.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  animation: pulse-step 1.2s ease-in-out infinite;
+}
+
+.extract-step.done {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.extract-step-arrow {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+@keyframes pulse-step {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.extract-result-section {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 14px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--accent-dim);
+}
+
+.extract-result-image-container {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-input);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.extract-result-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.extract-result-image {
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
+  transition: transform 0.2s;
+}
+
+.extract-result-image:hover {
+  transform: scale(1.01);
+}
+
+.extract-result-image-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.extract-img-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.extract-img-action-btn:hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .extract-main {
   flex: 1;
   overflow-y: auto;

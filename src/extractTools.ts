@@ -24,18 +24,21 @@ export const EXTRACT_TOOLS: ExtractTool[] = [
     description: '分离出图片中的主要人物/角色，输出带透明背景的结果',
     category: 'extract',
     responseFormat: 'image',
-    prompt: `You are an image processing assistant. Analyze the provided image and identify the main character(s) or person(s) in it.
+    prompt: `You are an image processing assistant specialized in character extraction.
 
-Your task: Describe in precise detail the appearance of the main character(s) - their clothing, hair, pose, facial features, accessories, and any distinguishing characteristics.
+Step 1 — Analyze: Carefully examine the image. Identify the main character/subject. Describe their appearance in precise detail: clothing, hairstyle, hair color, pose, facial features, expression, accessories, body type, distinguishing marks.
 
-Then generate a clean description that could be used to recreate JUST the character with a transparent/plain background:
+Step 2 — Compose: Write a complete image-generation prompt that will recreate this character as a standalone full-body portrait with a clean plain background (pure white or single-color), in the same artistic style as the source image, high detail, sharp focus.
 
-Format your response as:
-**Character Description**
-[detailed appearance description]
+You MUST output your response in **exactly this two-section format** (do not add any other sections or commentary outside these blocks):
 
-**Transparent Background Prompt**
-[precise prompt to recreate the character alone on transparent background, high quality, detailed]`,
+**### Analysis**
+[Your detailed character description here, 3-6 bullet points]
+
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One single paragraph prompt suitable for an image generation model, including: subject description, pose, clothing, style, background ("on plain white background" or "isolated on clean single-color background"), quality tags. Example: "a young woman with long black hair, wearing a red leather jacket and jeans, confident standing pose, anime cel-shaded style, on pure white background, full body, detailed, 4k"]
+<<<GENERATION_PROMPT_END>>>`,
   },
   {
     id: 'extract_background',
@@ -44,16 +47,21 @@ Format your response as:
     description: '移除前景元素，仅保留背景场景',
     category: 'extract',
     responseFormat: 'image',
-    prompt: `You are an image processing assistant. Analyze the provided image and remove all foreground subjects (people, objects, text, UI elements) to isolate just the background.
+    prompt: `You are an image processing assistant specialized in background extraction.
 
-Your task: Describe the background scene in detail - the environment, lighting, colors, textures, and any atmospheric elements.
+Step 1 — Analyze: Examine the image. Identify and describe the background environment, completely ignoring any foreground subjects (people, characters, objects, text, UI elements). Describe the scene, environment, lighting, colors, atmosphere, textures, time of day, weather.
 
-Format your response as:
-**Background Description**
-[detailed background description]
+Step 2 — Compose: Write a complete image-generation prompt that will recreate only this background scene — with all foreground subjects removed — in the same artistic style as the source image.
 
-**Background Only Prompt**  
-[precise prompt to recreate the background without any foreground subjects, maintaining the same style and atmosphere]`,
+You MUST output your response in **exactly this two-section format**:
+
+**### Analysis**
+[Your detailed background analysis here, 3-6 bullet points]
+
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One paragraph prompt describing only the background, no people/characters/foreground objects, maintaining style, lighting, time of day, atmosphere. Example: "a bustling cyberpunk alley at night, neon signs in pink and blue, wet reflective streets, steam rising from vents, cinematic lighting, painterly style, no people, empty scene"]
+<<<GENERATION_PROMPT_END>>>`,
   },
   {
     id: 'extract_colors',
@@ -112,20 +120,25 @@ Format your response as:
     id: 'extract_region',
     name: '提取区域',
     icon: '⬛',
-    description: '选择图片中的特定区域进行提取和放大',
+    description: '提取图片中的特定区域并进行高清放大',
     category: 'extract',
-    requiresRegion: true,
     responseFormat: 'image',
-    prompt: `You are an image processing assistant. The user has selected a specific region of the image. 
+    prompt: `You are an image processing assistant specializing in region zoom-in and enhancement.
 
-Extract and analyze the selected region. Zoom in and describe the details in that area with high precision.
+The user wants to extract a close-up detail from this image. Analyze the image and identify the most interesting focal area (usually the face, a key object, or the center of action).
 
-Format your response as:
-**Region Description**
-[detailed description of what is in the selected region]
+Step 1 — Describe: What is the main focal point? Describe it in precise visual detail.
+Step 2 — Compose: Write a prompt that recreates a zoomed-in close-up version of just that focal region, with high clarity and added detail.
 
-**Enhanced View Prompt**
-[prompt to recreate a zoomed-in, high-detail version of just this region]`,
+You MUST output your response in **exactly this two-section format**:
+
+**### Analysis**
+[Your analysis of the focal region]
+
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One paragraph close-up prompt describing only the focal region in high detail, including: subject close-up angle, fine details to enhance, style matching the original. Example: "extreme close-up of a young warrior's face, detailed eyes with golden irises, scar across left cheek, short brown hair, medieval leather collar, cinematic lighting, hyper-realistic detail, 8k"]
+<<<GENERATION_PROMPT_END>>>`,
   },
   {
     id: 'extract_pixel_color',
@@ -204,20 +217,20 @@ Format your response as:
     description: 'AI超分辨率增强图片细节，提升清晰度',
     category: 'edit',
     responseFormat: 'image',
-    prompt: `You are an image enhancement specialist. Analyze the provided image and generate a prompt for recreating it at higher resolution with enhanced details.
+    prompt: `You are an image enhancement specialist. Analyze the provided image and produce a prompt that will recreate it at higher resolution with enhanced detail.
 
-Examine:
-1. Subject matter and composition
-2. Art style and rendering technique
-3. Level of detail and any areas that could be enhanced
-4. Color palette and lighting
+Step 1 — Analyze: Describe the image composition, subject, art style, current detail level, and areas that could be sharpened/enhanced.
+Step 2 — Compose: Write a prompt that will recreate this exact image at higher resolution, with enhanced textures, finer detail, and sharp focus, while preserving the original subject, composition and style.
 
-Format your response as:
-**Enhancement Analysis**
-[assessment of current quality and areas for improvement]
+You MUST output your response in **exactly this two-section format**:
 
-**High-Resolution Recreation Prompt**
-[detailed prompt to recreate the image at higher resolution with enhanced clarity, maintaining the original style and composition]`,
+**### Analysis**
+[Your analysis including composition, style, and detail opportunities]
+
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One paragraph describing the SAME image as the original but emphasizing "ultra high resolution, 8k, highly detailed, sharp focus, masterwork quality" and specifying the exact same subject, pose, setting, colors, style as the source image. Must be faithful recreation, not a new image.]
+<<<GENERATION_PROMPT_END>>>`,
   },
   {
     id: 'describe_image',
@@ -249,48 +262,47 @@ Provide two descriptions:
     id: 'convert_style',
     name: '风格转换',
     icon: '🔄',
-    description: '将图片转换为指定的艺术风格',
+    description: '将图片转换为指定的艺术风格（默认转为吉卜力动画风格）',
     category: 'edit',
     responseFormat: 'image',
-    prompt: `You are a style transfer specialist. Analyze the provided image and help the user convert it to a different artistic style.
+    prompt: `You are a style transfer specialist. The user wants to convert this image into a different artistic style.
 
-First, describe the current style of the image briefly. Then provide prompts for converting it to popular alternative styles:
+Default conversion: **Studio Ghibli anime style** (Hayao Miyazaki style). If the image suggests a more appropriate target style, suggest alternatives.
 
-**Current Style**: [brief description]
+Step 1 — Analyze: Briefly describe the current style, subject, and composition of the image.
+Step 2 — Compose: Write a prompt that will recreate this same image's subject, pose, and composition but in Studio Ghibli anime style: hand-drawn 2D aesthetic, soft cel-shading, pastel sky gradients, lush green environments, expressive simple faces, dreamy warm lighting.
 
-**Style Conversion Options**:
-1. **Anime/Cel Shaded**: [prompt]
-2. **Oil Painting**: [prompt]  
-3. **Watercolor**: [prompt]
-4. **Pixel Art**: [prompt]
-5. **Line Art/Sketch**: [prompt]
-6. **Photorealistic**: [prompt]
+You MUST output your response in **exactly this two-section format**:
 
-Note: Ask the user which style they'd like, or describe a custom style.`,
+**### Analysis**
+[Your brief analysis of current style and subject]
+
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One paragraph describing the SAME subject and composition but explicitly in "Studio Ghibli style, Hayao Miyazaki anime, 2D hand-drawn, soft cel-shaded, pastel colors, dreamy warm lighting, detailed background, no 3D rendering, flat shading". Must preserve the original subject/scene.]
+<<<GENERATION_PROMPT_END>>>`,
   },
   {
     id: 'remove_watermark',
     name: '去水印',
     icon: '🧼',
-    description: '识别图片中的水印位置并生成去除方案',
+    description: '识别图片中的水印并生成无水印版本',
     category: 'edit',
-    responseFormat: 'text',
-    prompt: `You are an image analysis assistant. Check the provided image for any watermarks, text overlays, logos, or unwanted marks.
+    responseFormat: 'image',
+    prompt: `You are an image restoration specialist. Analyze the provided image for any watermarks, logos, text overlays, stock photo marks, or unwanted stamps.
 
-For each mark found:
-- Describe its position, size, opacity
-- Describe what it looks like
-- Suggest how to remove it cleanly
+Step 1 — Detect: Identify all marks found — describe position, size, appearance, and opacity.
+Step 2 — Compose: Write a prompt that will recreate the image's content EXACTLY as it is, in the same style and composition, but completely free of any watermarks, logos, or text overlays — a clean version.
 
-Format your response as:
-**Detected Marks**:
-1. [Type] at [position] - [description]
-...
+You MUST output your response in **exactly this two-section format**:
 
-**Removal Prompt**
-[a prompt to recreate the image without any watermarks, preserving original content]
+**### Analysis**
+[List the detected marks and the original image content to be preserved]
 
-**Notes**: [any considerations about the removal process]`,
+**### Generation Prompt**
+<<<GENERATION_PROMPT_START>>>
+[One paragraph that describes the original image's content and style faithfully, ending with: "no watermark, no logo, no text overlay, completely clean image, pristine quality". Must preserve subject, composition, colors, style exactly.]
+<<<GENERATION_PROMPT_END>>>`,
   },
 ];
 

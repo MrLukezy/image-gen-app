@@ -82,6 +82,7 @@ export interface ExtractTask {
   loading?: boolean;
   error?: string;
   timestamp: number;
+  step?: 'analyzing' | 'generating';
 }
 
 export interface ExtractConversation {
