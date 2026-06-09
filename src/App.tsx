@@ -221,7 +221,7 @@ export default function App() {
   const [extractConversations, setExtractConversations] = useState<ExtractConversation[]>([]);
   const [activeExtractConvId, setActiveExtractConvId] = useState<string | null>(null);
   const [extractImage, setExtractImage] = useState<string | null>(null);
-  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractLoadingConvs, setExtractLoadingConvs] = useState<Set<string>>(new Set());
   const [extractError, setExtractError] = useState<string | null>(null);
   const [activeExtractCat, setActiveExtractCat] = useState('extract');
   const [favoriteFolders, setFavoriteFolders] = useState<StoredFavoriteFolder[]>(() => getFavoriteFolders());
@@ -793,7 +793,9 @@ export default function App() {
   };
 
   const runExtractTool = async (toolId: string) => {
-    if (!extractImage || extractLoading) return;
+    const convId = activeExtractConvId;
+    const image = extractImage;
+    if (!image || !convId || extractLoadingConvs.has(convId)) return;
     const tool = getToolById(toolId);
     if (!tool) return;
 
@@ -803,11 +805,18 @@ export default function App() {
       return;
     }
 
-    setExtractLoading(true);
+    setExtractLoadingConvs(prev => new Set(prev).add(convId));
     setExtractError(null);
 
-    const activeConv = extractConversations.find(c => c.id === activeExtractConvId);
-    if (!activeConv) { setExtractLoading(false); return; }
+    const activeConv = extractConversations.find(c => c.id === convId);
+    if (!activeConv) { 
+      setExtractLoadingConvs(prev => { 
+        const next = new Set(prev); 
+        next.delete(convId); 
+        return next; 
+      }); 
+      return; 
+    }
 
     // Get user notes for this category
     const notes = extractNotes[tool.category]?.trim() || '';
@@ -818,7 +827,7 @@ export default function App() {
     const userTask: ExtractTask = {
       id: genId(),
       type: 'user',
-      sourceImage: extractImage,
+      sourceImage: image,
       extractType: toolId,
       timestamp: Date.now(),
       resultText: notes || undefined,
@@ -827,7 +836,7 @@ export default function App() {
     const loadingTask: ExtractTask = {
       id: genId(),
       type: 'assistant',
-      sourceImage: extractImage,
+      sourceImage: image,
       extractType: toolId,
       loading: true,
       step: 'analyzing',
@@ -836,22 +845,22 @@ export default function App() {
 
     let currentTasks = [...activeConv.tasks, userTask, loadingTask];
     let currentConvs = extractConversations.map(c =>
-      c.id === activeExtractConvId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
+      c.id === convId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
     );
     setExtractConversations(currentConvs);
 
     const updateTask = (updates: Partial<ExtractTask>) => {
       currentTasks = currentTasks.map(t => t.id === loadingTask.id ? { ...t, ...updates } : t);
       currentConvs = currentConvs.map(c =>
-        c.id === activeExtractConvId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
+        c.id === convId ? { ...c, tasks: currentTasks, updatedAt: Date.now() } : c
       );
       setExtractConversations(currentConvs);
     };
 
     try {
-      const imageBase64 = extractImage.startsWith('data:')
-        ? extractImage
-        : await invoke<string>('read_image_base64', { path: extractImage });
+      const imageBase64 = image.startsWith('data:')
+        ? image
+        : await invoke<string>('read_image_base64', { path: image });
 
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
       const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
@@ -1004,7 +1013,11 @@ export default function App() {
     } catch (err) {
       updateTask({ loading: false, error: String(err), step: undefined });
     } finally {
-      setExtractLoading(false);
+      setExtractLoadingConvs(prev => {
+        const next = new Set(prev);
+        next.delete(convId);
+        return next;
+      });
     }
   };
 
@@ -2297,7 +2310,7 @@ export default function App() {
                             key={tool.id}
                             className="extract-tool-btn"
                             onClick={() => runExtractTool(tool.id)}
-                            disabled={extractLoading || !extractImage}
+                            disabled={(activeExtractConvId && extractLoadingConvs.has(activeExtractConvId)) || !extractImage}
                             title={tool.description}
                           >
                             <span className="extract-tool-icon">{tool.icon}</span>
