@@ -13,7 +13,6 @@ import {
   getLlmConfig, saveLlmConfig,
   getFavoriteFolders, saveFavoriteFolders,
   getFavorites, saveFavorites, addFavorite, removeFavorite, updateFavorite,
-  getExtractSessions, saveExtractSessions,
   PROVIDER_PRESETS,
   type Provider,
   type McpConfig,
@@ -374,9 +373,18 @@ export default function App() {
     loadConversations();
     fetchModelsList();
     fetchLlmModels();
-    const sess = getExtractSessions();
-    setExtractConversations(sess as ExtractConversation[]);
+    loadExtractSessions();
   }, []);
+
+  const loadExtractSessions = async () => {
+    try {
+      const sessions = await invoke<ExtractConversation[]>('load_extract_sessions');
+      setExtractConversations(Array.isArray(sessions) ? sessions : []);
+    } catch (error) {
+      console.error('Failed to load extract sessions:', error);
+      setExtractConversations([]);
+    }
+  };
 
   useEffect(() => {
     const handleClick = () => { setContextMenu(null); setShowAddToFavMenu(null); };
@@ -399,7 +407,7 @@ export default function App() {
   }, [apiUrl, apiKey, model, activeProviderId]);
 
   useEffect(() => {
-    saveExtractSessions(extractConversations);
+    invoke('save_extract_sessions', { sessions: extractConversations }).catch(() => {});
   }, [extractConversations]);
 
   useEffect(() => {
@@ -633,8 +641,7 @@ export default function App() {
       mcpPollRef.current = setInterval(loadMcpConversations, 800);
     } else if (cat === 'extract') {
       // load extract sessions
-      const sess = getExtractSessions() as ExtractConversation[];
-      setExtractConversations(sess);
+      loadExtractSessions();
     } else if (cat === 'favorites') {
       setFavorites(getFavorites());
       setFavoriteFolders(getFavoriteFolders());

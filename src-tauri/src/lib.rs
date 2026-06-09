@@ -1384,6 +1384,37 @@ async fn fetch_llm_models(api_key: String, api_url: String) -> Result<Vec<LlmMod
     Ok(models)
 }
 
+// ──────────────────────────── Extract Sessions ────────────────────────────
+
+#[tauri::command]
+fn save_extract_sessions(app: tauri::AppHandle, sessions: serde_json::Value) -> Result<(), String> {
+    let path = app_data_dir(&app)
+        .ok_or_else(|| "Cannot determine app data dir".to_string())?
+        .join("extract_sessions.json");
+    
+    let json = serde_json::to_string(&sessions).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+fn load_extract_sessions(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let path = app_data_dir(&app)
+        .ok_or_else(|| "Cannot determine app data dir".to_string())?
+        .join("extract_sessions.json");
+    
+    if !path.exists() {
+        return Ok(serde_json::json!([]));
+    }
+    
+    let json = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let sessions: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or(serde_json::json!([]));
+    
+    Ok(sessions)
+}
+
 // ──────────────────────────── Main ────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1443,6 +1474,8 @@ pub fn run() {
             get_mcp_server_url,
             llm_chat,
             fetch_llm_models,
+            save_extract_sessions,
+            load_extract_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
