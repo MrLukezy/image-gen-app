@@ -192,3 +192,126 @@ export function getMcpConfig(): McpConfig {
 export function saveMcpConfig(config: McpConfig) {
   setLocal(MCP_CONFIG_KEY, JSON.stringify(config));
 }
+
+// ──────────────────────────── LLM Config ──────────────────────────────────
+
+export interface LlmConfig {
+  providerId: string;
+  model: string;
+}
+
+const LLM_CONFIG_KEY = 'image_gen_llm_config';
+
+export function getLlmConfig(): LlmConfig {
+  const raw = getLocal(LLM_CONFIG_KEY);
+  if (raw) {
+    try {
+      const cfg = JSON.parse(raw);
+      return {
+        providerId: cfg.providerId || '',
+        model: cfg.model || 'gpt-4o',
+      };
+    } catch {}
+  }
+  return { providerId: '', model: 'gpt-4o' };
+}
+
+export function saveLlmConfig(config: LlmConfig) {
+  setLocal(LLM_CONFIG_KEY, JSON.stringify(config));
+}
+
+// ──────────────────────────── Favorites ──────────────────────────────────
+
+const FAVORITES_KEY = 'image_gen_favorites';
+const FAVORITE_FOLDERS_KEY = 'image_gen_favorite_folders';
+
+export interface StoredFavorite {
+  id: string;
+  imageUrl: string;
+  folderId: string;
+  name?: string;
+  tags?: string[];
+  sourceConversationId?: string;
+  sourceEntryId?: string;
+  createdAt: number;
+}
+
+export interface StoredFavoriteFolder {
+  id: string;
+  name: string;
+  icon?: string;
+  description?: string;
+  createdAt: number;
+}
+
+const DEFAULT_FOLDERS: StoredFavoriteFolder[] = [
+  { id: 'chars', name: '角色管理', icon: '👤', description: '管理游戏角色立绘、头像等', createdAt: Date.now() },
+  { id: 'scenes', name: '场景', icon: '🏞️', description: '管理场景、背景图片', createdAt: Date.now() },
+  { id: 'items', name: '道具', icon: '🎁', description: '管理道具、UI素材图片', createdAt: Date.now() },
+];
+
+export function getFavoriteFolders(): StoredFavoriteFolder[] {
+  const raw = getLocal(FAVORITE_FOLDERS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length > 0) return arr;
+    } catch {}
+  }
+  saveFavoriteFolders(DEFAULT_FOLDERS);
+  return DEFAULT_FOLDERS;
+}
+
+export function saveFavoriteFolders(folders: StoredFavoriteFolder[]) {
+  setLocal(FAVORITE_FOLDERS_KEY, JSON.stringify(folders));
+}
+
+export function getFavorites(): StoredFavorite[] {
+  const raw = getLocal(FAVORITES_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {}
+  }
+  return [];
+}
+
+export function saveFavorites(favorites: StoredFavorite[]) {
+  setLocal(FAVORITES_KEY, JSON.stringify(favorites));
+}
+
+export function addFavorite(item: StoredFavorite) {
+  const all = getFavorites();
+  all.push(item);
+  saveFavorites(all);
+}
+
+export function removeFavorite(id: string) {
+  const all = getFavorites().filter(f => f.id !== id);
+  saveFavorites(all);
+}
+
+export function updateFavorite(id: string, updates: Partial<StoredFavorite>) {
+  const all = getFavorites().map(f => f.id === id ? { ...f, ...updates } : f);
+  saveFavorites(all);
+}
+
+// ──────────────────────────── Extract Sessions ──────────────────────────
+
+const EXTRACT_SESSIONS_KEY = 'image_gen_extract_sessions';
+
+export function getExtractSessions(): unknown[] {
+  const raw = getLocal(EXTRACT_SESSIONS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {}
+  }
+  return [];
+}
+
+export function saveExtractSessions(sessions: unknown[]) {
+  setLocal(EXTRACT_SESSIONS_KEY, JSON.stringify(sessions));
+}

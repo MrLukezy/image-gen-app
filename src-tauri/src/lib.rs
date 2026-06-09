@@ -1219,6 +1219,171 @@ fn get_mcp_server_url() -> Result<String, String> {
     Ok(format!("http://{}:3845/mcp", local_ip))
 }
 
+// ──────────────────────────── LLM Commands ─────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmChatMessage {
+    role: String,
+    content: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmRequest {
+    model: String,
+    messages: Vec<LlmChatMessage>,
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmChoice {
+    message: LlmChoiceMessage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmChoiceMessage {
+    content: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmResponse {
+    choices: Vec<LlmChoice>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmResult {
+    content: String,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn llm_chat(
+    api_url: String,
+    api_key: String,
+    model: String,
+    prompt: String,
+    image_base64: String,
+) -> Result<LlmResult, String> {
+    let image_url = if image_base64.starts_with("data:") {
+        image_base64.clone()
+    } else {
+        format!("data:image/png;base64,{}", image_base64)
+    };
+
+    let user_content = serde_json::json!([
+        {
+            "type": "text",
+            "text": prompt
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+                "detail": "high"
+            }
+        }
+    ]);
+
+    let payload = LlmRequest {
+        model: model.clone(),
+        messages: vec![LlmChatMessage {
+            role: "user".to_string(),
+            content: user_content,
+        }],
+        max_tokens: Some(4096),
+    };
+
+    let request = HTTP_CLIENT
+        .post(&api_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload);
+
+    let resp = match send_with_retry(request, 1).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(LlmResult {
+                content: String::new(),
+                error: Some(format!("请求失败: {}", e)),
+            });
+        }
+    };
+
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+
+    let parsed: LlmResponse = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(LlmResult {
+                content: String::new(),
+                error: Some(format!("解析响应失败: {} / body: {}", e, &body[..body.len().min(200)])),
+            });
+        }
+    };
+
+    if let Some(err) = parsed.error {
+        return Ok(LlmResult {
+            content: String::new(),
+            error: Some(err.to_string()),
+        });
+    }
+
+    if let Some(choice) = parsed.choices.first() {
+        let content = choice.message.content.clone().unwrap_or_default();
+        Ok(LlmResult { content, error: None })
+    } else {
+        Ok(LlmResult {
+            content: String::new(),
+            error: Some("模型未返回任何内容".to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmModelsResponse {
+    data: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LlmModelInfo {
+    id: String,
+}
+
+#[tauri::command]
+async fn fetch_llm_models(api_key: String, api_url: String) -> Result<Vec<LlmModelInfo>, String> {
+    let models_url = format!("{}/models", api_url.trim_end_matches('/'));
+
+    let request = HTTP_CLIENT
+        .get(&models_url)
+        .header("Authorization", format!("Bearer {}", api_key));
+
+    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+
+    let parsed: LlmModelsResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+
+    let models: Vec<LlmModelInfo> = parsed.data
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let id = v.get("id")?.as_str()?.to_string();
+            let lower = id.to_lowercase();
+            if lower.contains("image") || lower.contains("dall") || lower.contains("flux") {
+                return None;
+            }
+            let vision_keywords = ["gpt-4", "gpt-4o", "gpt-4.1", "claude", "gemini", "qwen-vl", "llava", "glm-4v", "internvl"];
+            let is_vision = vision_keywords.iter().any(|kw| lower.contains(kw));
+            if is_vision || !lower.contains("image") {
+                Some(LlmModelInfo { id })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(models)
+}
+
 // ──────────────────────────── Main ────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1276,6 +1441,8 @@ pub fn run() {
             save_mcp_config_file,
             delete_mcp_conversation,
             get_mcp_server_url,
+            llm_chat,
+            fetch_llm_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

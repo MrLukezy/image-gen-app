@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation } from './types';
+import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
+import { EXTRACT_TOOLS, EXTRACT_CATEGORIES, getToolById } from './extractTools';
 import {
   getAppConfig, saveAppConfig,
   getOpenWindowConvIds, saveOpenWindowConvIds,
@@ -9,9 +10,16 @@ import {
   getCustomPresets, saveCustomPresets,
   getProviders, saveProviders, getActiveProviderId, saveActiveProviderId,
   getMcpConfig, saveMcpConfig,
+  getLlmConfig, saveLlmConfig,
+  getFavoriteFolders, saveFavoriteFolders,
+  getFavorites, saveFavorites, addFavorite, removeFavorite, updateFavorite,
+  getExtractSessions, saveExtractSessions,
   PROVIDER_PRESETS,
   type Provider,
   type McpConfig,
+  type LlmConfig,
+  type StoredFavorite,
+  type StoredFavoriteFolder,
 } from './store';
 import './styles/App.css';
 import LocalImage from './LocalImage';
@@ -197,10 +205,36 @@ export default function App() {
   const [parallelCount, setParallelCount] = useState(1);
   const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
-  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp'>('normal');
+  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites'>('normal');
   const [mcpConversations, setMcpConversations] = useState<McpConversation[]>([]);
   const [activeMcpSessionId, setActiveMcpSessionId] = useState<string | null>(null);
   const [mcpConfig, setMcpConfigState] = useState<McpConfig>(() => getMcpConfig());
+  const [llmConfig, setLlmConfigState] = useState<LlmConfig>(() => getLlmConfig());
+  const [settingsTab, setSettingsTab] = useState<'image' | 'mcp' | 'llm'>('image');
+  const [llmModels, setLlmModels] = useState<{id: string}[]>([{ id: 'gpt-4o' }]);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number; y: number;
+    imageUrl: string;
+    convId?: string;
+    entryId?: string;
+  } | null>(null);
+  const [extractConversations, setExtractConversations] = useState<ExtractConversation[]>([]);
+  const [activeExtractConvId, setActiveExtractConvId] = useState<string | null>(null);
+  const [extractImage, setExtractImage] = useState<string | null>(null);
+  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [activeExtractCat, setActiveExtractCat] = useState('extract');
+  const [favoriteFolders, setFavoriteFolders] = useState<StoredFavoriteFolder[]>(() => getFavoriteFolders());
+  const [favorites, setFavorites] = useState<StoredFavorite[]>(() => getFavorites());
+  const [activeFolderId, setActiveFolderId] = useState<string>('all');
+  const [editingFavoriteId, setEditingFavoriteId] = useState<string | null>(null);
+  const [editingFavoriteName, setEditingFavoriteName] = useState('');
+  const [showAddFolder, setShowAddFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [_showAddToFavMenu, setShowAddToFavMenu] = useState<{ x: number; y: number; imageUrl: string; convId?: string; entryId?: string } | null>(null);
+  const [pendingExtractFromImage, setPendingExtractFromImage] = useState<string | null>(null);
+  const [showMentionDropdown, setShowMentionDropdown] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState('');
   const mcpPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -338,6 +372,15 @@ export default function App() {
   useEffect(() => {
     loadConversations();
     fetchModelsList();
+    fetchLlmModels();
+    const sess = getExtractSessions();
+    setExtractConversations(sess as ExtractConversation[]);
+  }, []);
+
+  useEffect(() => {
+    const handleClick = () => { setContextMenu(null); setShowAddToFavMenu(null); };
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
   }, []);
 
   useEffect(() => {
@@ -353,6 +396,10 @@ export default function App() {
   useEffect(() => {
     saveAppConfig({ apiUrl, apiKey, model, activeProviderId });
   }, [apiUrl, apiKey, model, activeProviderId]);
+
+  useEffect(() => {
+    saveExtractSessions(extractConversations);
+  }, [extractConversations]);
 
   useEffect(() => {
     const activeProv = providers.find(p => p.id === mcpConfig.providerId);
@@ -489,13 +536,17 @@ export default function App() {
   const switchConv = (id: string) => {
     const conv = conversations.find(c => c.id === id);
     if (conv) {
+      const isStillLoading = loadingConvs.has(id);
       const hasLoading = conv.entries.some(e => e.loading);
-      const finalEntries = hasLoading ? finalizeEntries(conv.entries) : conv.entries;
-      setActiveConvId(id);
-      setEntries(finalEntries);
-      if (hasLoading) {
+      if (hasLoading && !isStillLoading) {
+        const finalEntries = finalizeEntries(conv.entries);
+        setActiveConvId(id);
+        setEntries(finalEntries);
         const title = finalEntries.find((e: ConvEntry) => e.type === 'user' && e.prompt)?.prompt?.slice(0, 30) || conv.title;
         invoke('save_conversation', { conversationId: id, title, entries: finalEntries }).catch(() => {});
+      } else {
+        setActiveConvId(id);
+        setEntries(conv.entries);
       }
     }
   };
@@ -569,7 +620,7 @@ export default function App() {
     }
   };
 
-  const switchSidebarCategory = (cat: 'normal' | 'mcp') => {
+  const switchSidebarCategory = (cat: 'normal' | 'mcp' | 'extract' | 'favorites') => {
     if (cat === sidebarCategory) return;
     if (mcpPollRef.current) {
       clearInterval(mcpPollRef.current);
@@ -579,6 +630,13 @@ export default function App() {
     if (cat === 'mcp') {
       loadMcpConversations();
       mcpPollRef.current = setInterval(loadMcpConversations, 800);
+    } else if (cat === 'extract') {
+      // load extract sessions
+      const sess = getExtractSessions() as ExtractConversation[];
+      setExtractConversations(sess);
+    } else if (cat === 'favorites') {
+      setFavorites(getFavorites());
+      setFavoriteFolders(getFavoriteFolders());
     } else {
       setActiveMcpSessionId(null);
       setMcpBatchDetailEntryId(null);
@@ -685,6 +743,253 @@ export default function App() {
       next.delete(value);
       return next;
     });
+  };
+
+  // ── Extract Handlers ──────────────────────────────────────────────────
+
+  const openExtractFromImage = (imageUrl: string) => {
+    setContextMenu(null);
+    setSidebarCategory('extract');
+    setExtractImage(imageUrl);
+    setExtractError(null);
+    const id = genId();
+    const newConv: ExtractConversation = {
+      id,
+      title: `提取 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+      sourceImage: imageUrl,
+      tasks: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const updated = [newConv, ...extractConversations];
+    setExtractConversations(updated);
+    setActiveExtractConvId(id);
+  };
+
+  useEffect(() => {
+    if (pendingExtractFromImage) {
+      openExtractFromImage(pendingExtractFromImage);
+      setPendingExtractFromImage(null);
+    }
+  }, [pendingExtractFromImage]);
+
+  const deleteExtractConv = (id: string) => {
+    const updated = extractConversations.filter(c => c.id !== id);
+    setExtractConversations(updated);
+    if (activeExtractConvId === id) {
+      setActiveExtractConvId(updated[0]?.id || null);
+      setExtractImage(updated[0]?.sourceImage || null);
+    }
+  };
+
+  const switchExtractConv = (id: string) => {
+    const conv = extractConversations.find(c => c.id === id);
+    if (conv) {
+      setActiveExtractConvId(id);
+      setExtractImage(conv.sourceImage);
+      setExtractError(null);
+    }
+  };
+
+  const runExtractTool = async (toolId: string) => {
+    if (!extractImage || extractLoading) return;
+    const tool = getToolById(toolId);
+    if (!tool) return;
+
+    const prov = providers.find(p => p.id === llmConfig.providerId) || activeProvider;
+    if (!prov) {
+      setExtractError('请先在设置中配置语言模型代理');
+      return;
+    }
+
+    setExtractLoading(true);
+    setExtractError(null);
+
+    const activeConv = extractConversations.find(c => c.id === activeExtractConvId);
+    if (!activeConv) { setExtractLoading(false); return; }
+
+    const userTask: ExtractTask = {
+      id: genId(),
+      type: 'user',
+      sourceImage: extractImage,
+      extractType: toolId,
+      timestamp: Date.now(),
+    };
+
+    const loadingTask: ExtractTask = {
+      id: genId(),
+      type: 'assistant',
+      sourceImage: extractImage,
+      extractType: toolId,
+      loading: true,
+      timestamp: Date.now(),
+    };
+
+    const updatedTasks = [...activeConv.tasks, userTask, loadingTask];
+    const updatedConvs = extractConversations.map(c =>
+      c.id === activeExtractConvId ? { ...c, tasks: updatedTasks, updatedAt: Date.now() } : c
+    );
+    setExtractConversations(updatedConvs);
+
+    try {
+      const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
+      const result = await invoke<{ content: string; error: string | null }>('llm_chat', {
+        apiUrl: llmApiUrl,
+        apiKey: prov.apiKey,
+        model: llmConfig.model,
+        prompt: tool.prompt,
+        imageBase64: extractImage.startsWith('data:') ? extractImage : await invoke<string>('read_image_base64', { path: extractImage }),
+      });
+
+      if (result.error) {
+        const finalTasks = updatedTasks.map(t =>
+          t.id === loadingTask.id ? { ...t, loading: false, error: result.error! } : t
+        );
+        const finalConvs = updatedConvs.map(c =>
+          c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
+        );
+        setExtractConversations(finalConvs);
+      } else {
+        const finalTasks = updatedTasks.map(t =>
+          t.id === loadingTask.id ? { ...t, loading: false, resultText: result.content } : t
+        );
+        const finalConvs = updatedConvs.map(c =>
+          c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
+        );
+        setExtractConversations(finalConvs);
+      }
+    } catch (err) {
+      const finalTasks = updatedTasks.map(t =>
+        t.id === loadingTask.id ? { ...t, loading: false, error: String(err) } : t
+      );
+      const finalConvs = updatedConvs.map(c =>
+        c.id === activeExtractConvId ? { ...c, tasks: finalTasks, updatedAt: Date.now() } : c
+      );
+      setExtractConversations(finalConvs);
+    } finally {
+      setExtractLoading(false);
+    }
+  };
+
+  const handleExtractFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setExtractImage(reader.result as string);
+      setExtractError(null);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  // ── Favorites Handlers ────────────────────────────────────────────────
+
+  const handleAddFavorite = (imageUrl: string, folderId: string, convId?: string, entryId?: string) => {
+    const item: StoredFavorite = {
+      id: genId(),
+      imageUrl,
+      folderId,
+      sourceConversationId: convId,
+      sourceEntryId: entryId,
+      createdAt: Date.now(),
+    };
+    addFavorite(item);
+    setFavorites(getFavorites());
+    setShowAddToFavMenu(null);
+    setContextMenu(null);
+  };
+
+  const handleRemoveFavorite = (id: string) => {
+    removeFavorite(id);
+    setFavorites(getFavorites());
+  };
+
+  const handleUpdateFavoriteName = (id: string, name: string) => {
+    updateFavorite(id, { name });
+    setFavorites(getFavorites());
+    setEditingFavoriteId(null);
+  };
+
+  const handleAddFolder = () => {
+    if (!newFolderName.trim()) return;
+    const folder: StoredFavoriteFolder = {
+      id: genId(),
+      name: newFolderName.trim(),
+      createdAt: Date.now(),
+    };
+    const updated = [...favoriteFolders, folder];
+    setFavoriteFolders(updated);
+    saveFavoriteFolders(updated);
+    setNewFolderName('');
+    setShowAddFolder(false);
+  };
+
+  const handleDeleteFolder = (id: string) => {
+    const updated = favoriteFolders.filter(f => f.id !== id);
+    setFavoriteFolders(updated);
+    saveFavoriteFolders(updated);
+    const updatedFavs = favorites.filter(f => f.folderId !== id);
+    saveFavorites(updatedFavs);
+    setFavorites(updatedFavs);
+  };
+
+  const filteredFavorites = activeFolderId === 'all'
+    ? favorites
+    : favorites.filter(f => f.folderId === activeFolderId);
+
+  // ── Context Menu Handlers ─────────────────────────────────────────────
+
+  const openContextMenu = (e: React.MouseEvent, imageUrl: string, convId?: string, entryId?: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, imageUrl, convId, entryId });
+  };
+
+  const handleCopyImage = async (imageUrl: string) => {
+    setContextMenu(null);
+    try {
+      if (imageUrl.startsWith('data:')) {
+        const resp = await fetch(imageUrl);
+        const blob = await resp.blob();
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else if (imageUrl.startsWith('http')) {
+        await navigator.clipboard.writeText(imageUrl);
+      } else {
+        const b64 = await invoke<string>('read_image_base64', { path: imageUrl });
+        const resp = await fetch(b64);
+        const blob = await resp.blob();
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      }
+    } catch {}
+  };
+
+  const handleCopyImageLink = (imageUrl: string) => {
+    setContextMenu(null);
+    navigator.clipboard.writeText(imageUrl).catch(() => {});
+  };
+
+  const handleExtractFromContextMenu = (imageUrl: string) => {
+    setContextMenu(null);
+    setPendingExtractFromImage(imageUrl);
+  };
+
+  // ── LLM Models Fetch ──────────────────────────────────────────────────
+  const fetchLlmModels = async () => {
+    const prov = providers.find(p => p.id === llmConfig.providerId);
+    const key = prov?.apiKey || apiKey;
+    const url = prov?.baseUrl?.replace('/images/generations', '') || apiUrl.replace('/images/generations', '');
+    if (!key) return;
+    try {
+      const result = await invoke<{id: string}[]>('fetch_llm_models', { apiKey: key, apiUrl: url });
+      if (result.length > 0) setLlmModels(result);
+    } catch {}
+  };
+
+  const updateLlmConfig = (updates: Partial<LlmConfig>) => {
+    const updated = { ...llmConfig, ...updates };
+    setLlmConfigState(updated);
+    saveLlmConfig(updated);
   };
 
   // ── Send ─────────────────────────────────────────────────────────────
@@ -834,6 +1139,7 @@ export default function App() {
     batchProgressRef.current[batchId]![taskIdx] = {
       ...batchProgressRef.current[batchId]![taskIdx], status: 'success', image,
     };
+    if (activeConvIdRef.current !== batchConvIdRef.current) return;
     setEntries(prev => {
       const updated = prev.map(e =>
         e.batchId === batchId && e.loading
@@ -850,6 +1156,7 @@ export default function App() {
     batchProgressRef.current[batchId]![taskIdx] = {
       ...batchProgressRef.current[batchId]![taskIdx], status: 'failed', error,
     };
+    if (activeConvIdRef.current !== batchConvIdRef.current) return;
     setEntries(prev => {
       const updated = prev.map(e =>
         e.batchId === batchId && e.loading
@@ -1006,7 +1313,12 @@ export default function App() {
         const reader = new FileReader();
         reader.onload = (ev) => {
           const dataUrl = ev.target?.result as string;
-          setPastedImages(prev => prev.length < 6 ? [...prev, dataUrl] : prev);
+          if (sidebarCategory === 'extract') {
+            setExtractImage(dataUrl);
+            setExtractError(null);
+          } else {
+            setPastedImages(prev => prev.length < 6 ? [...prev, dataUrl] : prev);
+          }
         };
         reader.readAsDataURL(blob);
       }
@@ -1055,6 +1367,18 @@ export default function App() {
                 onClick={() => switchSidebarCategory('mcp')}
               >
                 MCP
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'extract' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('extract')}
+              >
+                提取
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'favorites' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('favorites')}
+              >
+                收藏
               </button>
             </div>
             <button
@@ -1147,7 +1471,7 @@ export default function App() {
                 </button>
               </div>
             </>
-          ) : (
+          ) : sidebarCategory === 'mcp' ? (
             <>
               <div className="sidebar-actions">
                 <button className="sidebar-new-btn" onClick={loadMcpConversations} title="刷新 MCP 会话列表">
@@ -1216,7 +1540,124 @@ export default function App() {
                 )}
               </div>
             </>
-          )}
+          ) : sidebarCategory === 'extract' ? (
+            <>
+              <div className="sidebar-actions">
+                <button className="sidebar-new-btn" onClick={() => {
+                  setExtractImage(null);
+                  setExtractError(null);
+                  setActiveExtractConvId(null);
+                }} title="开始新的提取会话">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  新提取
+                </button>
+              </div>
+              <div className="sidebar-list">
+                {extractConversations.length === 0 ? (
+                  <div className="sidebar-empty-hint">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                    </svg>
+                    <p>暂无提取记录</p>
+                    <p style={{ fontSize: '11px', opacity: 0.7 }}>上传图片或右键对话中的图片开始提取</p>
+                  </div>
+                ) : (
+                  [...extractConversations]
+                    .sort((a, b) => b.updatedAt - a.updatedAt)
+                    .map(ec => (
+                      <div
+                        key={ec.id}
+                        className={`conv-item ${activeExtractConvId === ec.id ? 'active' : ''}`}
+                        onClick={() => switchExtractConv(ec.id)}
+                      >
+                        <div className="conv-item-info">
+                          <div className="conv-item-title">{ec.title}</div>
+                          <div className="conv-item-preview">{ec.tasks.length} 条操作</div>
+                        </div>
+                        <div className="conv-item-actions">
+                          <button
+                            className="conv-action-btn conv-delete-btn"
+                            title="删除"
+                            onClick={e => { e.stopPropagation(); deleteExtractConv(ec.id); }}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </>
+          ) : sidebarCategory === 'favorites' ? (
+            <>
+              <div className="sidebar-actions">
+                <button className="sidebar-new-btn" onClick={() => setShowAddFolder(true)} title="新建收藏夹">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  新建收藏夹
+                </button>
+              </div>
+              {showAddFolder && (
+                <div className="sidebar-add-folder-form">
+                  <input
+                    className="conv-rename-input"
+                    placeholder="收藏夹名称"
+                    value={newFolderName}
+                    autoFocus
+                    onChange={e => setNewFolderName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddFolder(); if (e.key === 'Escape') setShowAddFolder(false); }}
+                  />
+                  <div className="sidebar-folder-form-actions">
+                    <button className="sidebar-new-btn" onClick={handleAddFolder}>确定</button>
+                    <button className="sidebar-new-btn" onClick={() => { setShowAddFolder(false); setNewFolderName(''); }}>取消</button>
+                  </div>
+                </div>
+              )}
+              <div className="sidebar-list">
+                <div
+                  className={`conv-item ${activeFolderId === 'all' ? 'active' : ''}`}
+                  onClick={() => setActiveFolderId('all')}
+                >
+                  <div className="conv-item-info">
+                    <div className="conv-item-title">全部收藏</div>
+                    <div className="conv-item-preview">{favorites.length} 项</div>
+                  </div>
+                </div>
+                {favoriteFolders.map(folder => (
+                  <div
+                    key={folder.id}
+                    className={`conv-item ${activeFolderId === folder.id ? 'active' : ''}`}
+                    onClick={() => setActiveFolderId(folder.id)}
+                  >
+                    <div className="conv-item-info">
+                      <div className="conv-item-title">
+                        {folder.icon || '📁'} {folder.name}
+                      </div>
+                      <div className="conv-item-preview">
+                        {favorites.filter(f => f.folderId === folder.id).length} 项
+                      </div>
+                    </div>
+                    <div className="conv-item-actions">
+                      <button
+                        className="conv-action-btn conv-delete-btn"
+                        title="删除收藏夹"
+                        onClick={e => { e.stopPropagation(); handleDeleteFolder(folder.id); }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : null}
         </aside>
       )}
 
@@ -1564,7 +2005,7 @@ export default function App() {
                           {!entry.loading && (!entry.batchTotal || entry.batchTotal <= 1) && entry.images && entry.images.length > 0 && (
                             <div className="image-grid">
                               {entry.images.map((img, i) => (
-                                <div key={i} className="image-card">
+                                <div key={i} className="image-card" onContextMenu={e => openContextMenu(e, img, activeMcpSessionId || undefined, entry.id)}>
                                   <LocalImage
                                     src={img}
                                     alt={`生成图片 ${i + 1}`}
@@ -1623,6 +2064,264 @@ export default function App() {
                     <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
                   </svg>
                   <p>从左侧选择一个 MCP 会话</p>
+                </div>
+              )}
+            </main>
+          </>
+        ) : sidebarCategory === 'extract' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <h1 className="app-title">图片提取</h1>
+                <span className="model-badge">{extractConversations.length} 个会话</span>
+              </div>
+              <div className="header-right">
+                <button className="header-icon-btn" onClick={() => setShowSettings(true)} title="设置">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <main className="extract-main" onPaste={handlePaste} tabIndex={0}>
+              {!extractImage && !activeExtractConvId ? (
+                <div className="extract-upload-area">
+                  <div className="extract-upload-box">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                    </svg>
+                    <h2>上传图片开始提取</h2>
+                    <p>支持上传或粘贴本地图片，或在对话中右键图片选择"提取"</p>
+                    <label className="extract-upload-btn">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        style={{ display: 'none' }}
+                        onChange={handleExtractFileUpload}
+                      />
+                      选择图片文件
+                    </label>
+                    <p className="extract-hint">也可以按 Ctrl+V 粘贴剪贴板中的图片</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="extract-content">
+                  <div className="extract-image-panel">
+                    <div className="extract-source-image">
+                      {extractImage && (
+                        <LocalImage src={extractImage} alt="提取源图片" style={{ maxHeight: '400px', objectFit: 'contain' }} />
+                      )}
+                      {extractImage && (
+                        <button className="extract-change-btn" onClick={() => { setExtractImage(null); setActiveExtractConvId(null); }}>
+                          更换图片
+                        </button>
+                      )}
+                    </div>
+                    <div className="extract-tools-panel">
+                      <div className="extract-cat-tabs">
+                        {EXTRACT_CATEGORIES.map(cat => (
+                          <button
+                            key={cat.id}
+                            className={`extract-cat-tab ${activeExtractCat === cat.id ? 'active' : ''}`}
+                            onClick={() => setActiveExtractCat(cat.id)}
+                          >
+                            <span>{cat.icon}</span>
+                            <span>{cat.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="extract-tools-grid">
+                        {EXTRACT_TOOLS.filter(t => t.category === activeExtractCat).map(tool => (
+                          <button
+                            key={tool.id}
+                            className="extract-tool-btn"
+                            onClick={() => runExtractTool(tool.id)}
+                            disabled={extractLoading || !extractImage}
+                            title={tool.description}
+                          >
+                            <span className="extract-tool-icon">{tool.icon}</span>
+                            <span className="extract-tool-name">{tool.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="extract-results-panel">
+                    {(() => {
+                      const conv = extractConversations.find(c => c.id === activeExtractConvId);
+                      if (!conv || conv.tasks.length === 0) return (
+                        <div className="extract-empty">
+                          <p>选择一个提取工具开始处理</p>
+                        </div>
+                      );
+                      return conv.tasks.map(task => (
+                        <div key={task.id} className={`extract-task ${task.type}`}>
+                          {task.type === 'user' && (
+                            <div className="extract-user-task">
+                              <div className="extract-tool-badge">{getToolById(task.extractType || '')?.name || '操作'}</div>
+                              <div className="extract-task-time">{formatTime(task.timestamp)}</div>
+                            </div>
+                          )}
+                          {task.type === 'assistant' && (
+                            <div className="extract-assistant-task">
+                              {task.loading && (
+                                <div className="loading-container">
+                                  <div className="loading-spinner" />
+                                  <span className="loading-text">正在分析...</span>
+                                </div>
+                              )}
+                              {task.error && (
+                                <div className="error-msg">
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                                  </svg>
+                                  {task.error}
+                                </div>
+                              )}
+                              {task.resultText && (
+                                <div className="extract-result-text">
+                                  {task.resultText.split('\n').map((line, i) => (
+                                    line.startsWith('**') && line.endsWith('**') ? (
+                                      <h4 key={i} className="extract-result-heading">{line.replace(/\*\*/g, '')}</h4>
+                                    ) : line.startsWith('- ') ? (
+                                      <li key={i} className="extract-result-item">{line.slice(2)}</li>
+                                    ) : line.trim() ? (
+                                      <p key={i} className="extract-result-para">{line}</p>
+                                    ) : <br key={i} />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              )}
+              {extractError && (
+                <div className="validation-error">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
+                  <span>{extractError}</span>
+                </div>
+              )}
+            </main>
+          </>
+        ) : sidebarCategory === 'favorites' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                  </svg>
+                </div>
+                <h1 className="app-title">收藏夹</h1>
+                <span className="model-badge">{activeFolderId === 'all' ? favorites.length : filteredFavorites.length} 项</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <main className="favorites-main">
+              {filteredFavorites.length === 0 ? (
+                <div className="favorites-empty">
+                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                  </svg>
+                  <h2>暂无收藏</h2>
+                  <p>在对话中右键图片即可收藏到此</p>
+                </div>
+              ) : (
+                <div className="favorites-grid">
+                  {filteredFavorites.map(fav => (
+                    <div key={fav.id} className="favorite-card">
+                      <div className="favorite-img-wrap" onClick={() => setLightboxSrc(fav.imageUrl)}>
+                        <LocalImage src={fav.imageUrl} alt={fav.name || '收藏图片'} style={{ cursor: 'zoom-in' }} />
+                      </div>
+                      <div className="favorite-info">
+                        {editingFavoriteId === fav.id ? (
+                          <input
+                            className="favorite-name-input"
+                            value={editingFavoriteName}
+                            autoFocus
+                            onChange={e => setEditingFavoriteName(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') handleUpdateFavoriteName(fav.id, editingFavoriteName);
+                              if (e.key === 'Escape') setEditingFavoriteId(null);
+                            }}
+                            onBlur={() => handleUpdateFavoriteName(fav.id, editingFavoriteName)}
+                          />
+                        ) : (
+                          <div
+                            className="favorite-name"
+                            onClick={() => { setEditingFavoriteId(fav.id); setEditingFavoriteName(fav.name || ''); }}
+                            title="点击编辑名称"
+                          >
+                            {fav.name || <span className="favorite-name-hint">点击添加名称</span>}
+                          </div>
+                        )}
+                        <div className="favorite-meta">
+                          <span>{fav.name ? `@${fav.name}` : ''}</span>
+                          <span>{new Date(fav.createdAt).toLocaleDateString('zh-CN')}</span>
+                        </div>
+                      </div>
+                      <div className="favorite-actions">
+                        <button
+                          className="favorite-action-btn"
+                          title="删除"
+                          onClick={() => handleRemoveFavorite(fav.id)}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </main>
@@ -1963,7 +2662,7 @@ export default function App() {
                     {!entry.loading && (!entry.batchTotal || entry.batchTotal <= 1) && entry.images && entry.images.length > 0 && (
                       <div className="image-grid">
                         {entry.images.map((img, i) => (
-                          <div key={i} className="image-card">
+                          <div key={i} className="image-card" onContextMenu={e => openContextMenu(e, img, activeConvId, entry.id)}>
                             <LocalImage
                               src={img}
                               alt={`生成图片 ${i + 1}`}
@@ -2352,14 +3051,54 @@ export default function App() {
           )}
 
           <div className="input-row">
+            {showMentionDropdown && favorites.filter(f => f.name && f.name.toLowerCase().includes(mentionFilter.toLowerCase())).length > 0 && (
+              <div className="mention-dropdown">
+                {favorites.filter(f => f.name && f.name.toLowerCase().includes(mentionFilter.toLowerCase())).slice(0, 8).map(fav => (
+                  <button
+                    key={fav.id}
+                    className="mention-item"
+                    onClick={() => {
+                      const match = prompt.match(/@([^@]*)$/);
+                      const atPos = match ? prompt.length - match[0].length : prompt.length;
+                      const newPrompt = prompt.slice(0, atPos) + `[ref:${fav.name}] `;
+                      setPrompt(newPrompt);
+                      setPastedImages(prev => prev.includes(fav.imageUrl) ? prev : [...prev, fav.imageUrl]);
+                      setShowMentionDropdown(false);
+                      setMentionFilter('');
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <div className="mention-thumb">
+                      <LocalImage src={fav.imageUrl} alt={fav.name} />
+                    </div>
+                    <div className="mention-info">
+                      <span className="mention-name">@{fav.name}</span>
+                      <span className="mention-folder">{favoriteFolders.find(f => f.id === fav.folderId)?.name || '未分类'}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
             <textarea
               ref={inputRef}
               className="input-field"
               value={prompt}
-              onChange={e => setPrompt(e.target.value)}
+              onChange={e => {
+                const v = e.target.value;
+                setPrompt(v);
+                const match = v.match(/@([^@\s]*)$/);
+                if (match) {
+                  setShowMentionDropdown(true);
+                  setMentionFilter(match[1]);
+                } else {
+                  setShowMentionDropdown(false);
+                  setMentionFilter('');
+                }
+              }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="描述你想生成的图片... (粘贴图片作为参考图，Shift+Enter 换行)"
+              onBlur={() => setTimeout(() => setShowMentionDropdown(false), 200)}
+              placeholder="描述你想生成的图片... (粘贴图片作为参考图，Shift+Enter 换行，@引用收藏图片)"
               rows={1}
               disabled={isLoading}
             />
@@ -2394,196 +3133,300 @@ export default function App() {
                 </svg>
               </button>
             </div>
+            <div className="settings-tabs">
+              <button
+                className={`settings-tab ${settingsTab === 'image' ? 'active' : ''}`}
+                onClick={() => setSettingsTab('image')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                </svg>
+                图片模型
+              </button>
+              <button
+                className={`settings-tab ${settingsTab === 'mcp' ? 'active' : ''}`}
+                onClick={() => setSettingsTab('mcp')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                </svg>
+                MCP
+              </button>
+              <button
+                className={`settings-tab ${settingsTab === 'llm' ? 'active' : ''}`}
+                onClick={() => setSettingsTab('llm')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                语言模型
+              </button>
+            </div>
             <div className="settings-body">
-              <div className="setting-item">
-                <label>代理 (Provider)</label>
-                <div className="provider-list">
-                  {providers.map(prov => (
-                    <div key={prov.id} className={`provider-item ${prov.id === activeProviderId ? 'active' : ''}`}>
-                      <div className="provider-item-main" onClick={() => switchProvider(prov.id)}>
-                        <span className="provider-item-name">{prov.name}</span>
-                        <span className="provider-item-url">{prov.baseUrl.replace(/https?:\/\//, '')}</span>
-                      </div>
-                      <div className="provider-item-actions">
-                        <button
-                          className="provider-action-btn"
-                          onClick={e => { e.stopPropagation(); openEditProviderForm(prov); }}
-                          title="编辑"
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+              {settingsTab === 'image' && (
+                <>
+                  <div className="setting-item">
+                    <label>代理 (Provider)</label>
+                    <div className="provider-list">
+                      {providers.map(prov => (
+                        <div key={prov.id} className={`provider-item ${prov.id === activeProviderId ? 'active' : ''}`}>
+                          <div className="provider-item-main" onClick={() => switchProvider(prov.id)}>
+                            <span className="provider-item-name">{prov.name}</span>
+                            <span className="provider-item-url">{prov.baseUrl.replace(/https?:\/\//, '')}</span>
+                          </div>
+                          <div className="provider-item-actions">
+                            <button
+                              className="provider-action-btn"
+                              onClick={e => { e.stopPropagation(); openEditProviderForm(prov); }}
+                              title="编辑"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                              </svg>
+                            </button>
+                            <button
+                              className="provider-action-btn provider-delete-btn"
+                              onClick={e => { e.stopPropagation(); deleteProvider(prov.id); }}
+                              title="删除"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      <button className="provider-add-btn" onClick={openAddProviderForm}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        添加代理
+                      </button>
+                    </div>
+                  </div>
+
+                  {showProviderForm && (
+                    <div className="provider-form">
+                      <div className="provider-form-header">
+                        <span>{editingProvider ? '编辑代理' : '添加代理'}</span>
+                        <button className="provider-form-close" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
                           </svg>
                         </button>
-                        <button
-                          className="provider-action-btn provider-delete-btn"
-                          onClick={e => { e.stopPropagation(); deleteProvider(prov.id); }}
-                          title="删除"
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                          </svg>
+                      </div>
+                      <select
+                        className="provider-form-select"
+                        value={providerFormPreset}
+                        onChange={e => handleProviderPresetChange(e.target.value)}
+                      >
+                        {PROVIDER_PRESETS.map(p => (
+                          <option key={p.value} value={p.value}>{p.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        className="provider-form-input"
+                        placeholder="代理名称"
+                        value={providerFormName}
+                        onChange={e => setProviderFormName(e.target.value)}
+                      />
+                      <input
+                        type="text"
+                        className="provider-form-input"
+                        placeholder="API 地址 (https://...)"
+                        value={providerFormUrl}
+                        onChange={e => setProviderFormUrl(e.target.value)}
+                      />
+                      <input
+                        type="password"
+                        className="provider-form-input"
+                        placeholder="API Key"
+                        value={providerFormKey}
+                        onChange={e => setProviderFormKey(e.target.value)}
+                      />
+                      <div className="provider-form-actions">
+                        <button className="provider-form-save" onClick={addOrUpdateProvider}>
+                          {editingProvider ? '保存' : '添加'}
+                        </button>
+                        <button className="provider-form-cancel" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
+                          取消
                         </button>
                       </div>
                     </div>
-                  ))}
-                  <button className="provider-add-btn" onClick={openAddProviderForm}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                    添加代理
-                  </button>
-                </div>
-              </div>
+                  )}
 
-              {showProviderForm && (
-                <div className="provider-form">
-                  <div className="provider-form-header">
-                    <span>{editingProvider ? '编辑代理' : '添加代理'}</span>
-                    <button className="provider-form-close" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
+                  <div className="setting-item">
+                    <label>API Key</label>
+                    <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-..." />
                   </div>
-                  <select
-                    className="provider-form-select"
-                    value={providerFormPreset}
-                    onChange={e => handleProviderPresetChange(e.target.value)}
-                  >
-                    {PROVIDER_PRESETS.map(p => (
-                      <option key={p.value} value={p.value}>{p.label}</option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    className="provider-form-input"
-                    placeholder="代理名称"
-                    value={providerFormName}
-                    onChange={e => setProviderFormName(e.target.value)}
-                  />
-                  <input
-                    type="text"
-                    className="provider-form-input"
-                    placeholder="API 地址 (https://...)"
-                    value={providerFormUrl}
-                    onChange={e => setProviderFormUrl(e.target.value)}
-                  />
-                  <input
-                    type="password"
-                    className="provider-form-input"
-                    placeholder="API Key"
-                    value={providerFormKey}
-                    onChange={e => setProviderFormKey(e.target.value)}
-                  />
-                  <div className="provider-form-actions">
-                    <button className="provider-form-save" onClick={addOrUpdateProvider}>
-                      {editingProvider ? '保存' : '添加'}
-                    </button>
-                    <button className="provider-form-cancel" onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}>
-                      取消
-                    </button>
+                  <div className="setting-item">
+                    <label>API 地址</label>
+                    <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="https://api.example.com/v1/images/generations" />
+                  </div>
+                  <div className="setting-item">
+                    <label>模型</label>
+                    <div className="model-setting-row">
+                      <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-image-2" />
+                      <button className="refresh-models-btn" onClick={fetchModelsList} title="从 API 获取可用模型">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+                          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {settingsTab === 'mcp' && (
+                <div className="setting-item mcp-settings-section">
+                  <label>MCP 服务器配置</label>
+                  <div className="mcp-settings-description">
+                    外部 AI 工具通过 MCP 协议调用本工具生成图片。配置用于 MCP 调用的 Provider 和默认参数。
+                  </div>
+                  <div className="mcp-setting-row">
+                    <label className="mcp-sub-label">MCP Provider</label>
+                    <select className="model-select" value={mcpConfig.providerId} onChange={e => updateMcpConfig({ providerId: e.target.value })}>
+                      <option value="">跟随当前</option>
+                      {providers.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
+                    </select>
+                  </div>
+                  <div className="mcp-setting-row">
+                    <label className="mcp-sub-label">默认尺寸</label>
+                    <select className="size-select" value={mcpConfig.defaultSize} onChange={e => updateMcpConfig({ defaultSize: e.target.value })}>
+                      {SIZE_OPTIONS.map(opt => (<option key={opt.value} value={opt.value}>{opt.label}</option>))}
+                    </select>
+                  </div>
+                  <div className="mcp-setting-row">
+                    <label className="mcp-sub-label">风格前缀</label>
+                    <input type="text" className="provider-form-input" value={mcpConfig.stylePrefix} onChange={e => updateMcpConfig({ stylePrefix: e.target.value })} placeholder="留空则不添加" />
+                  </div>
+                  <div className="mcp-setting-row">
+                    <label className="mcp-sub-label">输出目录</label>
+                    <input type="text" className="provider-form-input" value={mcpConfig.outputDir} onChange={e => updateMcpConfig({ outputDir: e.target.value })} placeholder="留空使用默认目录" />
+                  </div>
+                  <div className="mcp-startup-hint">
+                    <span className="mcp-sub-label">MCP 启动命令</span>
+                    <code className="mcp-cmd-code" onClick={e => { const range = document.createRange(); range.selectNode(e.currentTarget as Node); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range); }}>
+                      npx tsx scripts/mcp-server.ts
+                    </code>
+                    <span className="mcp-hint-text">在 AI 工具的 MCP 配置中添加上述命令</span>
                   </div>
                 </div>
               )}
 
-              <div className="setting-item">
-                <label>API Key</label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder="sk-..."
-                />
-              </div>
-              <div className="setting-item">
-                <label>API 地址</label>
-                <input
-                  type="text"
-                  value={apiUrl}
-                  onChange={e => setApiUrl(e.target.value)}
-                  placeholder="https://api.example.com/v1/images/generations"
-                />
-              </div>
-              <div className="setting-item">
-                <label>模型</label>
-                <div className="model-setting-row">
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={e => setModel(e.target.value)}
-                    placeholder="gpt-image-2"
-                  />
-                  <button
-                    className="refresh-models-btn"
-                    onClick={fetchModelsList}
-                    title="从 API 获取可用模型"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
+              {settingsTab === 'llm' && (
+                <>
+                  <div className="setting-item">
+                    <label>语言模型配置</label>
+                    <div className="mcp-settings-description">
+                      提取功能使用的语言模型，用于分析图片内容。需要配置一个支持图片输入的 LLM 服务（如 GPT-4o、Claude 3 等）。
+                    </div>
+                  </div>
+                  <div className="setting-item">
+                    <label className="mcp-sub-label">语言模型 Provider</label>
+                    <select
+                      className="model-select"
+                      value={llmConfig.providerId}
+                      onChange={e => updateLlmConfig({ providerId: e.target.value })}
+                    >
+                      <option value="">跟随当前图片模型代理</option>
+                      {providers.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="setting-item">
+                    <label className="mcp-sub-label">语言模型名称</label>
+                    <div className="model-setting-row">
+                      <input
+                        type="text"
+                        value={llmConfig.model}
+                        onChange={e => updateLlmConfig({ model: e.target.value })}
+                        placeholder="gpt-4o"
+                      />
+                      <button className="refresh-models-btn" onClick={fetchLlmModels} title="从 API 获取可用模型">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+                          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="setting-item">
+                    <label>可用语言模型</label>
+                    <div className="mcp-settings-description">
+                      以下是检测到的可用语言模型（需支持图片输入）：
+                    </div>
+                    <div className="llm-models-list">
+                      {llmModels.map(m => (
+                        <button
+                          key={m.id}
+                          className={`llm-model-item ${llmConfig.model === m.id ? 'active' : ''}`}
+                          onClick={() => updateLlmConfig({ model: m.id })}
+                        >
+                          {m.id}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
-              <div className="setting-item mcp-settings-section">
-                <label>MCP 服务器配置</label>
-                <div className="mcp-settings-description">
-                  外部 AI 工具通过 MCP 协议调用本工具生成图片。配置用于 MCP 调用的 Provider 和默认参数。
-                </div>
-                <div className="mcp-setting-row">
-                  <label className="mcp-sub-label">MCP Provider</label>
-                  <select
-                    className="model-select"
-                    value={mcpConfig.providerId}
-                    onChange={e => updateMcpConfig({ providerId: e.target.value })}
-                  >
-                    <option value="">跟随当前</option>
-                    {providers.map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mcp-setting-row">
-                  <label className="mcp-sub-label">默认尺寸</label>
-                  <select
-                    className="size-select"
-                    value={mcpConfig.defaultSize}
-                    onChange={e => updateMcpConfig({ defaultSize: e.target.value })}
-                  >
-                    {SIZE_OPTIONS.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mcp-setting-row">
-                  <label className="mcp-sub-label">风格前缀</label>
-                  <input
-                    type="text"
-                    className="provider-form-input"
-                    value={mcpConfig.stylePrefix}
-                    onChange={e => updateMcpConfig({ stylePrefix: e.target.value })}
-                    placeholder="留空则不添加"
-                  />
-                </div>
-                <div className="mcp-setting-row">
-                  <label className="mcp-sub-label">输出目录</label>
-                  <input
-                    type="text"
-                    className="provider-form-input"
-                    value={mcpConfig.outputDir}
-                    onChange={e => updateMcpConfig({ outputDir: e.target.value })}
-                    placeholder="留空使用默认目录"
-                  />
-                </div>
-                <div className="mcp-startup-hint">
-                  <span className="mcp-sub-label">MCP 启动命令</span>
-                  <code className="mcp-cmd-code" onClick={e => { const range = document.createRange(); range.selectNode(e.currentTarget as Node); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range); }}>
-                    npx tsx {import.meta.url ? '' : ''}scripts/mcp-server.ts
-                  </code>
-                  <span className="mcp-hint-text">在 AI 工具的 MCP 配置中添加上述命令</span>
-                </div>
-              </div>
+      {/* ── Context Menu ───────────────────────────────────────────────── */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={e => e.stopPropagation()}
+        >
+          <button className="context-menu-item" onClick={() => handleCopyImage(contextMenu.imageUrl)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+            复制图片
+          </button>
+          <button className="context-menu-item" onClick={() => handleCopyImageLink(contextMenu.imageUrl)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+            复制图片链接
+          </button>
+          <div className="context-menu-divider" />
+          <button className="context-menu-item" onClick={() => handleExtractFromContextMenu(contextMenu.imageUrl)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+            </svg>
+            提取图片
+          </button>
+          <div className="context-menu-divider" />
+          <div className="context-menu-submenu">
+            <div className="context-menu-item context-menu-parent-item">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+              </svg>
+              收藏到
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </div>
+            <div className="context-submenu-panel">
+              {favoriteFolders.map(folder => (
+                <button
+                  key={folder.id}
+                  className="context-menu-item"
+                  onClick={() => handleAddFavorite(contextMenu.imageUrl, folder.id, contextMenu.convId, contextMenu.entryId)}
+                >
+                  {folder.icon || '📁'} {folder.name}
+                </button>
+              ))}
             </div>
           </div>
         </div>

@@ -71,3 +71,43 @@ export interface McpConversation {
   updatedAt: number;
   source?: string;
 }
+
+export interface ExtractTask {
+  id: string;
+  type: 'user' | 'assistant';
+  sourceImage: string;
+  extractType?: string;
+  resultText?: string;
+  resultImage?: string;
+  loading?: boolean;
+  error?: string;
+  timestamp: number;
+}
+
+export interface ExtractConversation {
+  id: string;
+  title: string;
+  sourceImage: string;
+  tasks: ExtractTask[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FavoriteItem {
+  id: string;
+  imageUrl: string;
+  folderId: string;
+  name?: string;
+  tags?: string[];
+  sourceConversationId?: string;
+  sourceEntryId?: string;
+  createdAt: number;
+}
+
+export interface FavoriteFolder {
+  id: string;
+  name: string;
+  icon?: string;
+  description?: string;
+  createdAt: number;
+}
