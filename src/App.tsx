@@ -206,6 +206,7 @@ export default function App() {
   const [providerFormUrl, setProviderFormUrl] = useState('');
   const [providerFormKey, setProviderFormKey] = useState('');
   const [parallelCount, setParallelCount] = useState(1);
+  const [extractGroupCount, setExtractGroupCount] = useState(2);
   const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
   const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video'>('normal');
@@ -847,9 +848,11 @@ export default function App() {
 
     // Get user notes for this category
     const notes = extractNotes[tool.category]?.trim() || '';
+    const basePrompt = (tool.responseFormat === 'multi-image' && tool.multiImagePrompt) ? tool.multiImagePrompt : tool.prompt;
+    const withGroupCount = basePrompt.replace(/\{\{MAX_IMAGES\}\}/g, String(extractGroupCount));
     const enhancedPrompt = notes
-      ? `${tool.prompt}\n\n【用户额外要求】\n${notes}`
-      : tool.prompt;
+      ? `${withGroupCount}\n\n【用户额外要求】\n${notes}`
+      : withGroupCount;
 
     const userTaskId = genId();
     const loadingTaskId = genId();
@@ -1399,9 +1402,11 @@ ${analysisText}`;
         : await invoke<string>('read_image_base64', { path: image });
 
       const notes = extractNotes['extract']?.trim() || '';
+      const basePrompt = (tool.multiImagePrompt) ? tool.multiImagePrompt : tool.prompt;
+      const withGroupCount = basePrompt.replace(/\{\{MAX_IMAGES\}\}/g, String(extractGroupCount));
       const enhancedPrompt = notes
-        ? `${tool.prompt}\n\n【用户额外要求】\n${notes}`
-        : tool.prompt;
+        ? `${withGroupCount}\n\n【用户额外要求】\n${notes}`
+        : withGroupCount;
 
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
       const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
@@ -2863,13 +2868,59 @@ ${analysisText}`;
                           </label>
                           <textarea
                             className="extract-notes-input"
-                            placeholder={activeExtractCat === 'extract' 
-                              ? '输入额外的提取要求或约束（例如：特定细节强调、输出格式要求等）' 
+                            placeholder={activeExtractCat === 'extract'
+                              ? '输入额外的提取要求或约束（例如：特定细节强调、输出格式要求等）'
                               : '输入额外的处理要求（例如：强度调整、风格偏好等）'}
                             value={extractNotes[activeExtractCat] || ''}
                             onChange={(e) => setExtractNotes(prev => ({ ...prev, [activeExtractCat]: e.target.value }))}
                             rows={3}
                           />
+                        </div>
+                      )}
+
+                      {activeExtractCat === 'extract' && (
+                        <div className="extract-group-count-section">
+                          <label className="extract-notes-label">
+                            🎯 生成图片数量限制
+                          </label>
+                          <div className="extract-group-count-row">
+                            <button
+                              className="extract-count-btn"
+                              onClick={() => setExtractGroupCount(c => Math.max(1, c - 1))}
+                              disabled={extractGroupCount <= 1}
+                            >
+                              <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" /></svg>
+                            </button>
+                            <input
+                              type="range"
+                              className="extract-count-slider"
+                              min={1}
+                              max={10}
+                              value={extractGroupCount}
+                              onChange={e => setExtractGroupCount(parseInt(e.target.value))}
+                            />
+                            <input
+                              type="number"
+                              className="extract-count-input"
+                              value={extractGroupCount}
+                              min={1}
+                              max={10}
+                              onChange={e => {
+                                const v = parseInt(e.target.value);
+                                if (!isNaN(v) && v >= 1 && v <= 10) setExtractGroupCount(v);
+                              }}
+                            />
+                            <button
+                              className="extract-count-btn"
+                              onClick={() => setExtractGroupCount(c => Math.min(10, c + 1))}
+                              disabled={extractGroupCount >= 10}
+                            >
+                              <svg width="8" height="8" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" /><line x1="6" y1="2" x2="6" y2="10" stroke="currentColor" strokeWidth="1.5" /></svg>
+                            </button>
+                          </div>
+                          <div className="extract-count-hint">
+                            LLM 将尽量把素材合并到 <strong>{extractGroupCount}</strong> 张图片中展示
+                          </div>
                         </div>
                       )}
 

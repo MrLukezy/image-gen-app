@@ -3436,6 +3436,81 @@
   color: var(--text-tertiary);
 }
 
+.extract-group-count-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--bg-input);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.extract-group-count-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.extract-count-slider {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.extract-count-input {
+  width: 48px;
+  padding: 4px 8px;
+  text-align: center;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.extract-count-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.extract-count-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.extract-count-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.extract-count-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.extract-count-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.extract-count-hint strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .extract-all-section {
   margin-bottom: 4px;
 }
