@@ -959,12 +959,16 @@ export default function App() {
         const imageResults = await Promise.all(
           groupPrompts.map(async (genPrompt, idx) => {
             try {
+              const promptLower = genPrompt.toLowerCase();
+              const isGrid = /grid layout|2x2|3x3|4x4|multiple objects|multiple scene objects|all objects|all scene objects/i.test(promptLower);
+              const isCharacter = /character reference sheet|三视图|three views|front view.*side view.*back view/i.test(promptLower);
+              const genSize = isCharacter ? '1536x1024' : isGrid ? '1536x1024' : '1024x1024';
               const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
                 prompt: genPrompt,
                 apiKey: prov.apiKey,
                 apiUrl: genApiUrl,
                 model,
-                size: '1024x1024',
+                size: genSize,
                 n: 1,
                 referenceImages: [imageBase64],
                 responseFormat: 'b64_json',
@@ -1045,12 +1049,15 @@ export default function App() {
         updateTask({ resultText: displayAnalysis, step: 'generating' });
 
         const genApiUrl = prov.baseUrl;
+        const promptLower = generationPrompt.toLowerCase();
+        const isCharSheet = /character reference sheet|三视图|three views|front view.*side view.*back view|orthographic views/i.test(promptLower);
+        const genSize = isCharSheet ? '1536x1024' : '1024x1024';
         const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
           prompt: generationPrompt,
           apiKey: prov.apiKey,
           apiUrl: genApiUrl,
           model,
-          size: '1024x1024',
+          size: genSize,
           n: 1,
           referenceImages: [imageBase64],
           responseFormat: 'b64_json',
