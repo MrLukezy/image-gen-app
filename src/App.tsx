@@ -901,6 +901,39 @@ export default function App() {
       }));
     };
 
+    // Retry helper: attempts up to MAX_RETRIES times
+    const MAX_RETRIES = 3;
+    const generateImageWithRetry = async (params: {
+      prompt: string;
+      apiKey: string;
+      apiUrl: string;
+      model: string;
+      size: string;
+      n: number;
+      referenceImages: string[];
+      responseFormat: string;
+    }): Promise<{ images: string[]; error: string | null; attempt: number }> => {
+      let lastError: string | null = null;
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', params);
+          if (!result.error && result.images?.length > 0) {
+            return { images: result.images, error: null, attempt };
+          }
+          lastError = result.error || '生图未返回图片';
+          if (attempt < MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (err) {
+          lastError = String(err);
+          if (attempt < MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      }
+      return { images: [], error: `重试${MAX_RETRIES}次后仍失败: ${lastError}`, attempt: MAX_RETRIES };
+    };
+
     try {
       const imageBase64 = image.startsWith('data:')
         ? image
@@ -966,7 +999,7 @@ export default function App() {
               const isGrid = /grid layout|2x2|3x3|4x4|multiple objects|multiple scene objects|all objects|all scene objects/i.test(promptLower);
               const isCharacter = /character reference sheet|三视图|three views|front view.*side view.*back view/i.test(promptLower);
               const genSize = isCharacter ? '1536x1024' : isGrid ? '1536x1024' : '1024x1024';
-              const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+              const genResult = await generateImageWithRetry({
                 prompt: genPrompt,
                 apiKey: prov.apiKey,
                 apiUrl: genApiUrl,
@@ -977,10 +1010,10 @@ export default function App() {
                 responseFormat: 'b64_json',
               });
 
-              if (genResult.error || !genResult.images?.[0]) {
+              if (genResult.error) {
                 return { 
                   image: null, 
-                  error: genResult.error || `分组${idx + 1}生图失败`,
+                  error: genResult.error,
                   groupIdx: idx 
                 };
               }
@@ -1055,7 +1088,7 @@ export default function App() {
         const promptLower = generationPrompt.toLowerCase();
         const isCharSheet = /character reference sheet|三视图|three views|front view.*side view.*back view|orthographic views/i.test(promptLower);
         const genSize = isCharSheet ? '1536x1024' : '1024x1024';
-        const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+        const genResult = await generateImageWithRetry({
           prompt: generationPrompt,
           apiKey: prov.apiKey,
           apiUrl: genApiUrl,
@@ -1396,6 +1429,39 @@ ${analysisText}`;
       );
     };
 
+    // Retry helper: attempts up to MAX_RETRIES times
+    const MAX_RETRIES = 3;
+    const generateImageWithRetry = async (params: {
+      prompt: string;
+      apiKey: string;
+      apiUrl: string;
+      model: string;
+      size: string;
+      n: number;
+      referenceImages: string[];
+      responseFormat: string;
+    }): Promise<{ images: string[]; error: string | null; attempt: number }> => {
+      let lastError: string | null = null;
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', params);
+          if (!result.error && result.images?.length > 0) {
+            return { images: result.images, error: null, attempt };
+          }
+          lastError = result.error || '生图未返回图片';
+          if (attempt < MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (err) {
+          lastError = String(err);
+          if (attempt < MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      }
+      return { images: [], error: `重试${MAX_RETRIES}次后仍失败: ${lastError}`, attempt: MAX_RETRIES };
+    };
+
     try {
       const imageBase64 = image.startsWith('data:')
         ? image
@@ -1455,9 +1521,9 @@ ${analysisText}`;
 
       const genApiUrl = prov.baseUrl;
       const imageResults = await Promise.all(
-        groupPrompts.map(async (genPrompt, idx) => {
+        groupPrompts.map(async (genPrompt) => {
           try {
-            const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+            const genResult = await generateImageWithRetry({
               prompt: genPrompt,
               apiKey: prov.apiKey,
               apiUrl: genApiUrl,
@@ -1467,8 +1533,8 @@ ${analysisText}`;
               referenceImages: [imageBase64],
               responseFormat: 'b64_json',
             });
-            if (genResult.error || !genResult.images?.[0]) {
-              return { image: null, error: genResult.error || `分组${idx + 1}生图失败` };
+            if (genResult.error) {
+              return { image: null, error: genResult.error };
             }
             return { image: genResult.images[0], error: null };
           } catch (err) {
