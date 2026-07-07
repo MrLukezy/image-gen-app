@@ -592,6 +592,254 @@ async fn generate_images_parallel(
     Ok(results)
 }
 
+// ──────────────────────────── Video Generation ────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VideoCreateRequest {
+    model: String,
+    prompt: String,
+    orientation: String,
+    duration: i64,
+    watermark: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    videos: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audios: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_image_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VideoCreateResponse {
+    id: Option<String>,
+    task_id: Option<String>,
+    status: Option<String>,
+    error: Option<serde_json::Value>,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VideoQueryResponse {
+    id: Option<String>,
+    status: Option<String>,
+    progress: Option<serde_json::Value>,
+    video_url: Option<String>,
+    url: Option<String>,
+    error: Option<serde_json::Value>,
+    data: Option<serde_json::Value>,
+    result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct VideoResult {
+    video_url: Option<String>,
+    thumbnail_url: Option<String>,
+    error: Option<String>,
+    progress: Option<String>,
+}
+
+fn derive_video_base_url(image_api_url: &str) -> String {
+    if image_api_url.contains("/images/generations") {
+        image_api_url.replace("/images/generations", "")
+    } else if image_api_url.contains("/image_generation") {
+        image_api_url.replace("/image_generation", "")
+    } else if image_api_url.ends_with("/v1") {
+        image_api_url.to_string()
+    } else if image_api_url.ends_with("/v4") {
+        image_api_url.replace("/v4", "/v1")
+    } else if image_api_url.contains("/v1/") {
+        image_api_url.rsplit_once("/v1/").map(|(s, _)| format!("{}/v1", s))
+            .unwrap_or_else(|| image_api_url.trim_end_matches('/').to_string())
+    } else {
+        image_api_url.trim_end_matches('/').to_string()
+    }
+}
+
+#[tauri::command]
+async fn generate_video(
+    prompt: String,
+    api_key: String,
+    api_url: String,
+    model: String,
+    orientation: String,
+    duration: i64,
+    image_urls: Option<Vec<String>>,
+    video_urls: Option<Vec<String>>,
+    audio_urls: Option<Vec<String>>,
+    start_image_url: Option<String>,
+    end_image_url: Option<String>,
+    sd_size: Option<String>,
+) -> Result<VideoResult, String> {
+    let video_base = derive_video_base_url(&api_url);
+    let create_url = format!("{}/video/create", video_base);
+
+    let mut payload = VideoCreateRequest {
+        model: model.clone(),
+        prompt: prompt.clone(),
+        orientation: orientation.clone(),
+        duration,
+        watermark: false,
+        size: None,
+        images: image_urls.filter(|v| !v.is_empty()),
+        videos: video_urls.filter(|v| !v.is_empty()),
+        audios: audio_urls.filter(|v| !v.is_empty()),
+        start_image_url: start_image_url.filter(|s| !s.is_empty()),
+        end_image_url: end_image_url.filter(|s| !s.is_empty()),
+    };
+
+    if model == "sora-2" {
+        payload.size = Some("1080p".to_string());
+    } else if let Some(ref sz) = sd_size {
+        if !sz.is_empty() {
+            payload.size = Some(sz.clone());
+        }
+    }
+
+    let request = HTTP_CLIENT
+        .post(&create_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload);
+
+    let resp = send_with_retry(request, 2).await.map_err(|e| {
+        if e.is_timeout() { "视频请求超时，请检查网络".to_string() }
+        else { format!("请求失败: {}", e) }
+    })?;
+
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Ok(VideoResult {
+            video_url: None,
+            thumbnail_url: None,
+            error: Some(format!("HTTP {}: {}", status, &body[..body.len().min(300)])),
+            progress: None,
+        });
+    }
+
+    let create_resp: VideoCreateResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("解析响应失败: {} | {}", e, &body[..body.len().min(300)]))?;
+
+    if let Some(ref err) = create_resp.error {
+        let msg = err.as_str().unwrap_or("unknown error").to_string();
+        return Ok(VideoResult {
+            video_url: None,
+            thumbnail_url: None,
+            error: Some(format!("API错误: {}", msg)),
+            progress: None,
+        });
+    }
+
+    let task_id = create_resp.id
+        .or(create_resp.task_id.clone())
+        .unwrap_or_default();
+
+    if task_id.is_empty() {
+        return Ok(VideoResult {
+            video_url: None,
+            thumbnail_url: None,
+            error: Some("未获取到任务ID".to_string()),
+            progress: None,
+        });
+    }
+
+    let query_url = format!("{}/video/query?id={}", video_base, task_id);
+
+    for _i in 0..180 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let poll_request = HTTP_CLIENT
+            .get(&query_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .timeout(std::time::Duration::from_secs(30));
+
+        let poll_resp = match send_with_retry(poll_request, 1).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if !poll_resp.status().is_success() {
+            continue;
+        }
+
+        let poll_body = match poll_resp.text().await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let query: VideoQueryResponse = match serde_json::from_str(&poll_body) {
+            Ok(q) => q,
+            Err(_) => continue,
+        };
+
+        let st = query.status.as_deref().unwrap_or("");
+
+        if st == "completed" || st == "success" || st == "SUCCESS" {
+            let video_url = query.video_url
+                .or(query.url.clone())
+                .or_else(|| {
+                    if let Some(ref d) = query.data {
+                        d.get("video_url").and_then(|v| v.as_str()).map(|s| s.to_string())
+                            .or_else(|| d.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    } else if let Some(ref r) = query.result {
+                        r.get("video_url").and_then(|v| v.as_str()).map(|s| s.to_string())
+                            .or_else(|| r.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(url) = video_url {
+                return Ok(VideoResult {
+                    video_url: Some(url),
+                    thumbnail_url: None,
+                    error: None,
+                    progress: Some("100%".to_string()),
+                });
+            }
+        }
+
+        if st == "failed" || st == "error" || st == "ERROR" || st == "FAILED" {
+            let err_msg = query.error
+                .and_then(|e| e.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "视频生成失败".to_string());
+            return Ok(VideoResult {
+                video_url: None,
+                thumbnail_url: None,
+                error: Some(err_msg),
+                progress: None,
+            });
+        }
+
+        let pct = query.progress
+            .and_then(|v| {
+                v.as_i64().map(|i| i.to_string())
+                    .or_else(|| v.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+
+        if !pct.is_empty() {
+            // continue polling with progress info
+            eprintln!("[video] progress: {}%", pct);
+        }
+    }
+
+    Ok(VideoResult {
+        video_url: None,
+        thumbnail_url: None,
+        error: Some("视频生成超时（15分钟），请稍后重试".to_string()),
+        progress: None,
+    })
+}
+
 #[tauri::command]
 async fn fetch_models(api_key: String, api_url: String) -> Result<Vec<ModelInfo>, String> {
     let base = if api_url.contains("/images/generations") {
@@ -1454,6 +1702,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_image,
             generate_images_parallel,
+            generate_video,
             fetch_models,
             read_image_base64,
             create_conversation,

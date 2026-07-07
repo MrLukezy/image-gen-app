@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask } from './types';
+import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask, VideoConversation } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import { EXTRACT_TOOLS, EXTRACT_CATEGORIES, getToolById } from './extractTools';
 import {
@@ -13,6 +13,7 @@ import {
   getLlmConfig, saveLlmConfig,
   getFavoriteFolders, saveFavoriteFolders,
   getFavorites, saveFavorites, addFavorite, removeFavorite, updateFavorite,
+  getVideoConversations, saveVideoConversations,
   PROVIDER_PRESETS,
   type Provider,
   type McpConfig,
@@ -22,6 +23,9 @@ import {
 } from './store';
 import './styles/App.css';
 import LocalImage from './LocalImage';
+import AnimationTab from './AnimationTab';
+import VideoTab from './VideoTab';
+import type { AnimationConversation } from './types';
 
 const SIZE_OPTIONS = [
   { label: '1:1', value: '1024x1024' },
@@ -204,7 +208,7 @@ export default function App() {
   const [parallelCount, setParallelCount] = useState(1);
   const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
-  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites'>('normal');
+  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video'>('normal');
   const [mcpConversations, setMcpConversations] = useState<McpConversation[]>([]);
   const [activeMcpSessionId, setActiveMcpSessionId] = useState<string | null>(null);
   const [mcpConfig, setMcpConfigState] = useState<McpConfig>(() => getMcpConfig());
@@ -235,6 +239,13 @@ export default function App() {
   const [extractNotes, setExtractNotes] = useState<Record<string, string>>({});
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
+  const [animationConversations, setAnimationConversations] = useState<AnimationConversation[]>([]);
+  const [activeAnimationConvId, setActiveAnimationConvId] = useState<string | null>(null);
+  const [videoConversations, setVideoConversations] = useState<VideoConversation[]>(() => {
+    const stored = getVideoConversations();
+    return stored.length > 0 ? (stored as VideoConversation[]) : [];
+  });
+  const [activeVideoConvId, setActiveVideoConvId] = useState<string | null>(null);
   const mcpPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -273,7 +284,12 @@ export default function App() {
       setApiKey(prov.apiKey);
       setApiUrl(prov.baseUrl);
       saveActiveProviderId(provId);
-      setModels(prev => (prev.length > 0 ? prev : [{ id: model || 'gpt-image-2', pricing: null, resolution: null }]));
+      setModels([{ id: model || 'gpt-image-2', pricing: null, resolution: null }]);
+      if (prov.apiKey) {
+        invoke<ModelInfo[]>('fetch_models', { apiKey: prov.apiKey, apiUrl: prov.baseUrl })
+          .then(result => { if (result.length > 0) setModels(result); })
+          .catch(() => {});
+      }
     }
   };
 
@@ -409,6 +425,10 @@ export default function App() {
   useEffect(() => {
     invoke('save_extract_sessions', { sessions: extractConversations }).catch(() => {});
   }, [extractConversations]);
+
+  useEffect(() => {
+    saveVideoConversations(videoConversations);
+  }, [videoConversations]);
 
   useEffect(() => {
     const activeProv = providers.find(p => p.id === mcpConfig.providerId);
@@ -629,7 +649,7 @@ export default function App() {
     }
   };
 
-  const switchSidebarCategory = (cat: 'normal' | 'mcp' | 'extract' | 'favorites') => {
+  const switchSidebarCategory = (cat: 'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video') => {
     if (cat === sidebarCategory) return;
     if (mcpPollRef.current) {
       clearInterval(mcpPollRef.current);
@@ -645,6 +665,10 @@ export default function App() {
     } else if (cat === 'favorites') {
       setFavorites(getFavorites());
       setFavoriteFolders(getFavoriteFolders());
+    } else if (cat === 'animation' || cat === 'video') {
+      // animation/video conversations are loaded from localStorage on init
+      setActiveMcpSessionId(null);
+      setMcpBatchDetailEntryId(null);
     } else {
       setActiveMcpSessionId(null);
       setMcpBatchDetailEntryId(null);
@@ -1058,6 +1082,232 @@ export default function App() {
     }
   };
 
+  const parseGenerationPrompts = (text: string): { prompts: string[]; titles: string[]; display: string } => {
+    const prompts: string[] = [];
+    const titles: string[] = [];
+    const groupRegex = /### 生成提示词\s*[-–—]?\s*(.+?)\n([\s\S]*?)(?=### 生成提示词|$)/g;
+    let match;
+    while ((match = groupRegex.exec(text)) !== null) {
+      const title = match[1].trim();
+      prompts.push(match[2].trim());
+      titles.push(title);
+    }
+
+    if (prompts.length === 0) {
+      const markerMatches = [...text.matchAll(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/g)];
+      if (markerMatches.length > 0) {
+        markerMatches.forEach((m, idx) => {
+          prompts.push(m[1].trim());
+          titles.push(`结果${idx + 1}`);
+        });
+      } else {
+        const singleMatch = text.match(/###\s*生成提示词[^\n]*\n?([\s\S]+?)$/m);
+        if (singleMatch) {
+          prompts.push(singleMatch[1].trim());
+          titles.push('生成结果');
+        }
+      }
+    }
+
+    let display = text;
+    for (const title of titles) {
+      display = display.replace(new RegExp(`### 生成提示词\\s*[-–—]?\\s*${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=### 生成提示词|$)`, 'i'), '');
+    }
+    display = display
+      .replace(/<<<GENERATION_PROMPT_START>>>[\s\S]*?<<<GENERATION_PROMPT_END>>>/g, '')
+      .replace(/###\s*生成提示词[^\n]*$/gm, '')
+      .trim();
+
+    return { prompts, titles, display };
+  };
+
+  const generateImagesFromPrompts = async (
+    genPrompts: string[],
+    genTitles: string[],
+    imageBase64: string,
+    displayAnalysis: string,
+    prov: { apiKey: string; baseUrl: string },
+    updateTask: (updates: Partial<ExtractTask>) => void
+  ): Promise<boolean> => {
+    const genApiUrl = prov.baseUrl;
+    const styledPrompts = genPrompts.map(p => {
+      if (!p.toLowerCase().includes('same') &&
+          !p.toLowerCase().includes('style') &&
+          !p.toLowerCase().includes('match')) {
+        return p + ', in the exact same art style as the reference image';
+      }
+      return p;
+    });
+
+    const imageResults = await Promise.all(
+      styledPrompts.map(async (genPrompt, idx) => {
+        try {
+          const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+            prompt: genPrompt,
+            apiKey: prov.apiKey,
+            apiUrl: genApiUrl,
+            model,
+            size: '1024x1024',
+            n: 1,
+            referenceImages: [imageBase64],
+            responseFormat: 'b64_json',
+          });
+          if (genResult.error || !genResult.images?.[0]) {
+            return { image: null as string | null, error: genResult.error || `${genTitles[idx]}生图失败`, groupIdx: idx };
+          }
+          return { image: genResult.images[0] as string | null, error: null as string | null, groupIdx: idx };
+        } catch (err) {
+          return { image: null as string | null, error: String(err), groupIdx: idx };
+        }
+      })
+    );
+
+    const successImages = imageResults.filter(r => r.image).map(r => r.image as string);
+    const failedCount = imageResults.filter(r => !r.image).length;
+
+    if (successImages.length === 0) {
+      updateTask({ loading: false, error: '所有分组生图失败', step: undefined });
+      return false;
+    }
+
+    const errorSuffix = failedCount > 0 ? `\n\n⚠️ ${failedCount}个分组生图失败` : '';
+    const finalText = (displayAnalysis || '') + errorSuffix;
+    const groupTitles = genTitles.length > 1 ? genTitles : undefined;
+
+    if (successImages.length === 1 && genTitles.length <= 1) {
+      updateTask({
+        loading: false,
+        resultImage: successImages[0],
+        resultText: finalText || undefined,
+        step: undefined,
+      });
+    } else {
+      updateTask({
+        loading: false,
+        resultImages: successImages,
+        groupTitles,
+        resultText: finalText || undefined,
+        step: undefined,
+      });
+    }
+    return true;
+  };
+
+  const continueCustomExtract = async (convId: string, image: string, analysisText: string) => {
+    if (!image || !convId || extractLoadingConvs.has(convId)) return;
+
+    const prov = providers.find(p => p.id === llmConfig.providerId) || activeProvider;
+    if (!prov) {
+      setExtractError('请先在设置中配置语言模型代理');
+      return;
+    }
+
+    setExtractLoadingConvs(prev => {
+      const next = new Set(prev);
+      next.add(convId);
+      return next;
+    });
+    setExtractError(null);
+
+    const loadingTaskId = genId();
+    const now = Date.now();
+    const userTask: ExtractTask = {
+      id: genId(),
+      type: 'user',
+      sourceImage: image,
+      extractType: 'custom_continue',
+      timestamp: now,
+      resultText: '继续生成图片',
+    };
+    const loadingTask: ExtractTask = {
+      id: loadingTaskId,
+      type: 'assistant',
+      sourceImage: image,
+      extractType: 'custom_continue',
+      loading: true,
+      step: 'generating',
+      timestamp: now,
+    };
+
+    setExtractConversations(prev => prev.map(c => {
+      if (c.id !== convId) return c;
+      return { ...c, tasks: [...c.tasks, userTask, loadingTask], updatedAt: now };
+    }));
+
+    const updateTask = (updates: Partial<ExtractTask>) => {
+      setExtractConversations(prev => prev.map(c => {
+        if (c.id !== convId) return c;
+        return {
+          ...c,
+          tasks: c.tasks.map(t => t.id === loadingTaskId ? { ...t, ...updates } : t),
+          updatedAt: Date.now(),
+        };
+      }));
+    };
+
+    try {
+      const imageBase64 = image.startsWith('data:')
+        ? image
+        : await invoke<string>('read_image_base64', { path: image });
+
+      const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
+      const retryPrompt = `根据以下分析内容，生成用于图片生成的英文提示词。
+要求：
+1. 根据分析内容判断需要生成几张图
+2. 如果需要多张图，按以下格式输出多个：
+### 生成提示词 - 分组1
+[英文prompt]
+### 生成提示词 - 分组2
+[英文prompt]
+3. 如果只需要1张图：
+### 生成提示词
+[英文prompt]
+4. 每个提示词必须包含画面内容的详细描述和"in the exact same art style as the reference image"
+5. 只输出提示词，不要其他内容
+
+分析内容：
+${analysisText}`;
+
+      const retryResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+        apiUrl: llmApiUrl,
+        apiKey: prov.apiKey,
+        model: llmConfig.model,
+        prompt: retryPrompt,
+        imageBase64,
+      });
+
+      if (retryResult.error || !retryResult.content.trim()) {
+        updateTask({ loading: false, error: retryResult.error || 'LLM 未能生成提示词' });
+        return;
+      }
+
+      let { prompts: genPrompts, titles: genTitles } = parseGenerationPrompts(retryResult.content);
+
+      if (genPrompts.length === 0) {
+        let genPrompt = retryResult.content.trim();
+        if (!genPrompt.includes('###')) {
+          genPrompts.push(genPrompt);
+          genTitles.push('生成结果');
+        }
+      }
+
+      if (genPrompts.length === 0) {
+        updateTask({ loading: false, error: '未能解析生成提示词' });
+        return;
+      }
+
+      await generateImagesFromPrompts(genPrompts, genTitles, imageBase64, analysisText, prov, updateTask);
+    } catch (err) {
+      updateTask({ loading: false, error: String(err), step: undefined });
+    } finally {
+      setExtractLoadingConvs(prev => {
+        const next = new Set(prev);
+        next.delete(convId);
+        return next;
+      });
+    }
+  };
+
   const handleExtractFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1075,6 +1325,170 @@ export default function App() {
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const runExtractAll = async (convId: string, image: string) => {
+    if (!image || !convId || extractLoadingConvs.has(convId)) return;
+
+    const tool = getToolById('extract_all');
+    if (!tool) return;
+
+    const prov = providers.find(p => p.id === llmConfig.providerId) || activeProvider;
+    if (!prov) {
+      setExtractError('请先在设置中配置语言模型代理');
+      return;
+    }
+
+    setExtractLoadingConvs(prev => {
+      const next = new Set(prev);
+      next.add(convId);
+      return next;
+    });
+    setExtractError(null);
+
+    const now = Date.now();
+    const userTask: ExtractTask = {
+      id: genId(),
+      type: 'user',
+      sourceImage: image,
+      extractType: 'extract_all',
+      timestamp: now,
+      resultText: '提取全部元素',
+    };
+    const loadingTaskId = genId();
+    const loadingTask: ExtractTask = {
+      id: loadingTaskId,
+      type: 'assistant',
+      sourceImage: image,
+      extractType: 'extract_all',
+      loading: true,
+      step: 'analyzing',
+      timestamp: now,
+    };
+
+    setExtractConversations(prev =>
+      prev.map(c => {
+        if (c.id !== convId) return c;
+        return { ...c, tasks: [...c.tasks, userTask, loadingTask], updatedAt: now };
+      })
+    );
+
+    const updateTask = (updates: Partial<ExtractTask>) => {
+      setExtractConversations(prev =>
+        prev.map(c => {
+          if (c.id !== convId) return c;
+          return {
+            ...c,
+            tasks: c.tasks.map(t => (t.id === loadingTaskId ? { ...t, ...updates } : t)),
+            updatedAt: Date.now(),
+          };
+        })
+      );
+    };
+
+    try {
+      const imageBase64 = image.startsWith('data:')
+        ? image
+        : await invoke<string>('read_image_base64', { path: image });
+
+      const notes = extractNotes['extract']?.trim() || '';
+      const enhancedPrompt = notes
+        ? `${tool.prompt}\n\n【用户额外要求】\n${notes}`
+        : tool.prompt;
+
+      const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
+      const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+        apiUrl: llmApiUrl,
+        apiKey: prov.apiKey,
+        model: llmConfig.model,
+        prompt: enhancedPrompt,
+        imageBase64,
+      });
+
+      if (llmResult.error) {
+        updateTask({ loading: false, error: llmResult.error });
+        return;
+      }
+
+      const analysisText = llmResult.content;
+
+      const groupPrompts: string[] = [];
+      const groupTitles: string[] = [];
+      const groupRegex = /### 生成提示词 - 分组(\d+)\s*([\s\S]*?)(?=### 生成提示词 - 分组\d+|$)/g;
+      let match;
+      while ((match = groupRegex.exec(analysisText)) !== null) {
+        groupTitles.push(`分组${match[1]}`);
+        groupPrompts.push(match[2].trim());
+      }
+
+      if (groupPrompts.length === 0) {
+        const promptMatch = analysisText.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
+        if (promptMatch?.[1]) {
+          groupPrompts.push(promptMatch[1].trim());
+          groupTitles.push('提取结果');
+        }
+      }
+
+      if (groupPrompts.length === 0) {
+        updateTask({ loading: false, error: '未能解析生成提示词', resultText: analysisText });
+        return;
+      }
+
+      const displayAnalysis = analysisText
+        .replace(/### 生成提示词 - 分组\d+[\s\S]*?$/gm, '')
+        .replace(/### 生成提示词[\s\S]*$/, '')
+        .trim();
+
+      updateTask({ resultText: displayAnalysis, step: 'generating', groupTitles });
+
+      const genApiUrl = prov.baseUrl;
+      const imageResults = await Promise.all(
+        groupPrompts.map(async (genPrompt, idx) => {
+          try {
+            const genResult = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+              prompt: genPrompt,
+              apiKey: prov.apiKey,
+              apiUrl: genApiUrl,
+              model,
+              size: '1024x1024',
+              n: 1,
+              referenceImages: [imageBase64],
+              responseFormat: 'b64_json',
+            });
+            if (genResult.error || !genResult.images?.[0]) {
+              return { image: null, error: genResult.error || `分组${idx + 1}生图失败` };
+            }
+            return { image: genResult.images[0], error: null };
+          } catch (err) {
+            return { image: null, error: String(err) };
+          }
+        })
+      );
+
+      const successImages = imageResults.filter(r => r.image).map(r => r.image as string);
+      const failedCount = imageResults.filter(r => !r.image).length;
+
+      if (successImages.length === 0) {
+        updateTask({ loading: false, error: '所有分组生图失败', step: undefined });
+        return;
+      }
+
+      const errorText = failedCount > 0 ? `\n\n⚠️ ${failedCount}个分组生图失败` : undefined;
+      updateTask({
+        loading: false,
+        resultImages: successImages,
+        resultText: displayAnalysis + (errorText || ''),
+        step: undefined,
+      });
+    } catch (err) {
+      updateTask({ loading: false, error: String(err), step: undefined });
+    } finally {
+      setExtractLoadingConvs(prev => {
+        const next = new Set(prev);
+        next.delete(convId);
+        return next;
+      });
+    }
   };
 
   // ── Favorites Handlers ────────────────────────────────────────────────
@@ -1577,6 +1991,18 @@ export default function App() {
                 onClick={() => switchSidebarCategory('favorites')}
               >
                 收藏
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'animation' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('animation')}
+              >
+                动画
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'video' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('video')}
+              >
+                视频
               </button>
             </div>
             <button
@@ -2340,6 +2766,40 @@ export default function App() {
                       )}
                     </div>
                     <div className="extract-tools-panel">
+                      <div className="extract-all-section">
+                        <button
+                          className="extract-all-btn"
+                          onClick={() => {
+                            const img = extractImage;
+                            if (!img) return;
+                            if (activeExtractConvId && !extractLoadingConvs.has(activeExtractConvId)) {
+                              runExtractAll(activeExtractConvId, img);
+                            } else if (!activeExtractConvId) {
+                              const id = genId();
+                              const now = Date.now();
+                              const newConv: ExtractConversation = {
+                                id,
+                                title: `提取全部 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+                                sourceImage: img,
+                                tasks: [],
+                                createdAt: now,
+                                updatedAt: now,
+                              };
+                              setExtractConversations(prev => [newConv, ...prev]);
+                              setActiveExtractConvId(id);
+                              setTimeout(() => runExtractAll(id, img), 50);
+                            }
+                          }}
+                          disabled={(activeExtractConvId && extractLoadingConvs.has(activeExtractConvId)) || !extractImage}
+                          title="AI 自动分析图片中的所有元素，逐个独立提取：人物、背景、物体、场景物体"
+                        >
+                          <span className="extract-all-icon">🔮</span>
+                          <span className="extract-all-text">
+                            <span className="extract-all-title">提取全部元素</span>
+                            <span className="extract-all-desc">AI 分析所有元素并逐个独立提取</span>
+                          </span>
+                        </button>
+                      </div>
                       <div className="extract-cat-tabs">
                         {EXTRACT_CATEGORIES.map(cat => (
                           <button
@@ -2353,7 +2813,7 @@ export default function App() {
                         ))}
                       </div>
                       <div className="extract-tools-grid">
-                        {EXTRACT_TOOLS.filter(t => t.category === activeExtractCat).map(tool => (
+                        {EXTRACT_TOOLS.filter(t => t.category === activeExtractCat && t.id !== 'extract_all').map(tool => (
                           <button
                             key={tool.id}
                             className="extract-tool-btn"
@@ -2405,6 +2865,7 @@ export default function App() {
                           />
                         </div>
                       )}
+
                     </div>
                   </div>
                   <div className="extract-results-panel">
@@ -2412,14 +2873,14 @@ export default function App() {
                       const conv = extractConversations.find(c => c.id === activeExtractConvId);
                       if (!conv || conv.tasks.length === 0) return (
                         <div className="extract-empty">
-                          <p>选择一个提取工具开始处理</p>
+                          <p>选择一个提取工具或输入自定义提示词开始处理</p>
                         </div>
                       );
                       return conv.tasks.map(task => (
                         <div key={task.id} className={`extract-task ${task.type}`}>
                           {task.type === 'user' && (
                             <div className="extract-user-task">
-                              <div className="extract-tool-badge">{getToolById(task.extractType || '')?.name || '操作'}</div>
+                              <div className="extract-tool-badge">{task.extractType === 'custom' ? '自定义提取' : task.extractType === 'custom_continue' ? '继续生成' : (getToolById(task.extractType || '')?.name || '操作')}</div>
                               <div className="extract-task-time">{formatTime(task.timestamp)}</div>
                             </div>
                           )}
@@ -2468,6 +2929,18 @@ export default function App() {
                                     ) : <br key={i} />
                                   ))}
                                 </div>
+                              )}
+                              {task.resultText && !task.resultImage && !task.loading && task.extractType === 'custom' && activeExtractConvId && extractImage && (
+                                <button
+                                  className="extract-continue-btn"
+                                  disabled={extractLoadingConvs.has(activeExtractConvId)}
+                                  onClick={() => continueCustomExtract(activeExtractConvId!, extractImage!, task.resultText!)}
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <polygon points="5 3 19 12 5 21 5 3" />
+                                  </svg>
+                                  继续生成图片
+                                </button>
                               )}
                               {task.resultImage && (
                                 <div className="extract-result-image-container">
@@ -2687,6 +3160,92 @@ export default function App() {
                 </div>
               )}
             </main>
+          </>
+        ) : sidebarCategory === 'animation' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <h1 className="app-title">序列帧动画</h1>
+                <span className="model-badge">{animationConversations.length} 个会话</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <AnimationTab
+              apiKey={apiKey}
+              apiUrl={apiUrl}
+              model={model}
+              conversations={animationConversations}
+              setConversations={setAnimationConversations}
+              activeConvId={activeAnimationConvId}
+              setActiveConvId={setActiveAnimationConvId}
+              setLightboxSrc={setLightboxSrc}
+            />
+          </>
+        ) : sidebarCategory === 'video' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                  </svg>
+                </div>
+                <h1 className="app-title">AI 视频生成</h1>
+                <span className="model-badge">{videoConversations.length} 个会话</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <VideoTab
+              apiKey={apiKey}
+              apiUrl={apiUrl}
+              conversations={videoConversations}
+              setConversations={setVideoConversations}
+              activeConvId={activeVideoConvId}
+              setActiveConvId={setActiveVideoConvId}
+            />
           </>
         ) : showBatchDetail ? (
           <div className="trash-view">
@@ -3636,6 +4195,23 @@ export default function App() {
                           <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                         </svg>
                       </button>
+                    </div>
+                  </div>
+                  <div className="setting-item">
+                    <label>可用图片模型</label>
+                    <div className="mcp-settings-description">
+                      点击刷新按钮获取模型列表，点击模型名称即可选择：
+                    </div>
+                    <div className="llm-models-list">
+                      {models.map(m => (
+                        <button
+                          key={m.id}
+                          className={`llm-model-item ${model === m.id ? 'active' : ''}`}
+                          onClick={() => setModel(m.id)}
+                        >
+                          {m.id}{m.resolution ? ` [${m.resolution}]` : ''}{m.pricing ? ` (${m.pricing})` : ''}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </>

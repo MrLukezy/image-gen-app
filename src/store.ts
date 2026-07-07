@@ -315,3 +315,22 @@ export function getExtractSessions(): unknown[] {
 export function saveExtractSessions(sessions: unknown[]) {
   setLocal(EXTRACT_SESSIONS_KEY, JSON.stringify(sessions));
 }
+
+// ──────────────────────────── Video Conversations ────────────────────────
+
+const VIDEO_CONVERSATIONS_KEY = 'image_gen_video_conversations';
+
+export function getVideoConversations(): unknown[] {
+  const raw = getLocal(VIDEO_CONVERSATIONS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {}
+  }
+  return [];
+}
+
+export function saveVideoConversations(sessions: unknown[]) {
+  setLocal(VIDEO_CONVERSATIONS_KEY, JSON.stringify(sessions));
+}

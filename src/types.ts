@@ -114,3 +114,60 @@ export interface FavoriteFolder {
   description?: string;
   createdAt: number;
 }
+
+export interface AnimationTask {
+  id: string;
+  type: 'user' | 'assistant';
+  actionName: string;
+  frameCount: number;
+  spriteSheet?: string;
+  finalFrames?: string[];
+  referenceImages?: string[];
+  loading?: boolean;
+  error?: string;
+  timestamp: number;
+  step?: 'generating_sheets' | 'generating_frames';
+}
+
+export interface AnimationConversation {
+  id: string;
+  title: string;
+  characterName: string;
+  tasks: AnimationTask[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ──────────────────────────── Video ────────────────────────────────────────
+
+export type VideoModel = 'sora-2' | 'sd-2' | 'sd-2-vip' | 'Kling Omni';
+export type VideoOrientation = 'landscape' | 'portrait' | 'square';
+
+export interface VideoTask {
+  id: string;
+  type: 'user' | 'assistant';
+  prompt: string;
+  model: string;
+  orientation: VideoOrientation;
+  duration: string;
+  referenceImages?: string[];
+  referenceVideos?: string[];
+  referenceAudios?: string[];
+  startFrameImage?: string;
+  endFrameImage?: string;
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  loading?: boolean;
+  error?: string;
+  progress?: string;
+  timestamp: number;
+  completedAt?: number;
+}
+
+export interface VideoConversation {
+  id: string;
+  title: string;
+  tasks: VideoTask[];
+  createdAt: number;
+  updatedAt: number;
+}
