@@ -1360,7 +1360,7 @@ ${analysisText}`;
       sourceImage: image,
       extractType: 'extract_all',
       timestamp: now,
-      resultText: '提取全部元素',
+      resultText: 'UI 元素拆分',
     };
     const loadingTaskId = genId();
     const loadingTask: ExtractTask = {
@@ -2786,7 +2786,7 @@ ${analysisText}`;
                               const now = Date.now();
                               const newConv: ExtractConversation = {
                                 id,
-                                title: `提取全部 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+                                title: `UI拆分 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
                                 sourceImage: img,
                                 tasks: [],
                                 createdAt: now,
@@ -2798,12 +2798,12 @@ ${analysisText}`;
                             }
                           }}
                           disabled={(activeExtractConvId && extractLoadingConvs.has(activeExtractConvId)) || !extractImage}
-                          title="AI 自动分析图片中的所有元素，逐个独立提取：人物、背景、物体、场景物体"
+                          title="AI 自动分析 UI 截图中的所有可复用素材：背景底图、装饰图、图标、控件前景/背景、角色等"
                         >
-                          <span className="extract-all-icon">🔮</span>
+                          <span className="extract-all-icon">🧩</span>
                           <span className="extract-all-text">
-                            <span className="extract-all-title">提取全部元素</span>
-                            <span className="extract-all-desc">AI 分析所有元素并逐个独立提取</span>
+                            <span className="extract-all-title">UI 元素拆分</span>
+                            <span className="extract-all-desc">AI 分析 UI 截图并提取所有可复用素材</span>
                           </span>
                         </button>
                       </div>
