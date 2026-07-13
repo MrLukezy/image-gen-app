@@ -938,45 +938,63 @@ export default function App() {
         : await invoke<string>('read_image_base64', { path: image });
 
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
-      const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
-        apiUrl: llmApiUrl,
-        apiKey: prov.apiKey,
-        model: llmConfig.model,
-        prompt: enhancedPrompt,
-        imageBase64,
-      });
-
-      if (llmResult.error) {
-        updateTask({ loading: false, error: llmResult.error });
-        return;
-      }
-
-      const analysisText = llmResult.content;
+      let analysisText = '';
 
       // Handle multi-image generation (for extract_objects)
       if (tool.responseFormat === 'multi-image') {
-        // Parse grouped prompts: "### 生成提示词 - 分组1", "### 生成提示词 - 分组2", etc.
-        const groupPrompts: string[] = [];
-        const groupTitles: string[] = [];
-        const groupRegex = /### 生成提示词 - 分组(\d+)\s*([\s\S]*?)(?=### 生成提示词 - 分组\d+|$)/g;
-        let match;
-        while ((match = groupRegex.exec(analysisText)) !== null) {
-          groupTitles.push(`分组${match[1]}`);
-          groupPrompts.push(match[2].trim());
-        }
-
-        if (groupPrompts.length === 0) {
-          const promptMatch = analysisText.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
-          if (promptMatch && promptMatch[1]) {
-            groupPrompts.push(promptMatch[1].trim());
-            groupTitles.push('全部物体');
+        const MAX_LLM_RETRIES = 3;
+        let groupPrompts: string[] = [];
+        let groupTitles: string[] = [];
+        let analysisText = '';
+        const parseGroupPrompts = (text: string): [string[], string[]] => {
+          const promptList: string[] = [];
+          const titleList: string[] = [];
+          const groupRegex = /### 生成提示词\s*[-–—]\s*分组(\d+)\s*([\s\S]*?)(?=### 生成提示词|$)/g;
+          let m;
+          while ((m = groupRegex.exec(text)) !== null) {
+            titleList.push(`分组${m[1]}`);
+            promptList.push(m[2].trim());
           }
+          if (promptList.length === 0) {
+            const promptMatch = text.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
+            if (promptMatch?.[1]) {
+              promptList.push(promptMatch[1].trim());
+              titleList.push('分组1');
+            }
+          }
+          return [promptList, titleList];
+        };
+
+        let lastLlmContent = '';
+        for (let llmAttempt = 1; llmAttempt <= MAX_LLM_RETRIES; llmAttempt++) {
+          const actualPrompt = llmAttempt > 1
+            ? `${enhancedPrompt}\n\n【格式修正提醒 - 第${llmAttempt}次重试】你上一次的输出缺少正确的"### 生成提示词 - 分组1"标记。请严格按照输出格式，每个分组必须以"### 生成提示词 - 分组N"开头。`
+            : enhancedPrompt;
+
+          const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+            apiUrl: llmApiUrl,
+            apiKey: prov.apiKey,
+            model: llmConfig.model,
+            prompt: actualPrompt,
+            imageBase64,
+          });
+
+          if (llmResult.error) {
+            updateTask({ loading: false, error: llmResult.error });
+            return;
+          }
+
+          lastLlmContent = llmResult.content;
+          [groupPrompts, groupTitles] = parseGroupPrompts(lastLlmContent);
+          if (groupPrompts.length > 0) break;
         }
 
         if (groupPrompts.length === 0) {
-          updateTask({ loading: false, error: '未能解析生成提示词', resultText: analysisText });
+          updateTask({ loading: false, error: `LLM 返回格式不正确（重试${MAX_LLM_RETRIES}次后仍未能解析）`, resultText: lastLlmContent });
           return;
         }
+
+        analysisText = lastLlmContent;
 
         const displayAnalysis = analysisText
           .replace(/### 生成提示词 - 分组\d+[\s\S]*?$/gm, '')
@@ -1051,6 +1069,22 @@ export default function App() {
       }
 
       if (tool.responseFormat === 'image') {
+        // Single-image: call LLM
+        const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+          apiUrl: llmApiUrl,
+          apiKey: prov.apiKey,
+          model: llmConfig.model,
+          prompt: enhancedPrompt,
+          imageBase64,
+        });
+
+        if (llmResult.error) {
+          updateTask({ loading: false, error: llmResult.error });
+          return;
+        }
+
+        analysisText = llmResult.content;
+
         // Look for explicit generation prompt markers, or fallback to extracting
         // the ### 生成提示词 section, or last-resort use the entire analysis
         const markerMatch = analysisText.match(/<<<GENERATION_PROMPT_START>>>([\s\S]*?)<<<GENERATION_PROMPT_END>>>/);
@@ -1110,7 +1144,21 @@ export default function App() {
 
         updateTask({ loading: false, resultImage, step: undefined });
       } else {
-        updateTask({ loading: false, resultText: analysisText, step: undefined });
+        // Text-only: call LLM
+        const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+          apiUrl: llmApiUrl,
+          apiKey: prov.apiKey,
+          model: llmConfig.model,
+          prompt: enhancedPrompt,
+          imageBase64,
+        });
+
+        if (llmResult.error) {
+          updateTask({ loading: false, error: llmResult.error });
+          return;
+        }
+
+        updateTask({ loading: false, resultText: llmResult.content, step: undefined });
       }
     } catch (err) {
       updateTask({ loading: false, error: String(err), step: undefined });
@@ -1292,7 +1340,31 @@ export default function App() {
         : await invoke<string>('read_image_base64', { path: image });
 
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
-      const retryPrompt = `根据以下分析内容，生成用于图片生成的英文提示词。
+      
+      const MAX_CUSTOM_RETRIES = 3;
+      let genPrompts: string[] = [];
+      let genTitles: string[] = [];
+
+      for (let retryAttempt = 1; retryAttempt <= MAX_CUSTOM_RETRIES; retryAttempt++) {
+        const retryPrompt = retryAttempt > 1
+          ? `根据以下分析内容，生成用于图片生成的英文提示词。
+要求：
+1. 根据分析内容判断需要生成几张图
+2. 每个提示词必须严格按以下格式输出（必须包含"### 生成提示词 - 分组N"标记）：
+### 生成提示词 - 分组1
+[英文prompt]
+### 生成提示词 - 分组2
+[英文prompt]
+3. 如果只需要1张图：
+### 生成提示词 - 分组1
+[英文prompt]
+4. 每个提示词必须包含画面内容的详细描述和"in the exact same art style as the reference image"
+5. 只输出提示词，不要其他内容
+6. 【格式修正】你上一次的输出格式不正确，必须使用"### 生成提示词 - 分组N"格式的标题。
+
+分析内容：
+${analysisText}`
+          : `根据以下分析内容，生成用于图片生成的英文提示词。
 要求：
 1. 根据分析内容判断需要生成几张图
 2. 如果需要多张图，按以下格式输出多个：
@@ -1309,31 +1381,34 @@ export default function App() {
 分析内容：
 ${analysisText}`;
 
-      const retryResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
-        apiUrl: llmApiUrl,
-        apiKey: prov.apiKey,
-        model: llmConfig.model,
-        prompt: retryPrompt,
-        imageBase64,
-      });
+        const retryResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+          apiUrl: llmApiUrl,
+          apiKey: prov.apiKey,
+          model: llmConfig.model,
+          prompt: retryPrompt,
+          imageBase64,
+        });
 
-      if (retryResult.error || !retryResult.content.trim()) {
-        updateTask({ loading: false, error: retryResult.error || 'LLM 未能生成提示词' });
-        return;
-      }
-
-      let { prompts: genPrompts, titles: genTitles } = parseGenerationPrompts(retryResult.content);
-
-      if (genPrompts.length === 0) {
-        let genPrompt = retryResult.content.trim();
-        if (!genPrompt.includes('###')) {
-          genPrompts.push(genPrompt);
-          genTitles.push('生成结果');
+        if (retryResult.error || !retryResult.content.trim()) {
+          updateTask({ loading: false, error: retryResult.error || 'LLM 未能生成提示词' });
+          return;
         }
+
+        ({ prompts: genPrompts, titles: genTitles } = parseGenerationPrompts(retryResult.content));
+
+        if (genPrompts.length === 0) {
+          const genPrompt = retryResult.content.trim();
+          if (!genPrompt.includes('###')) {
+            genPrompts.push(genPrompt);
+            genTitles.push('生成结果');
+          }
+        }
+
+        if (genPrompts.length > 0) break;
       }
 
       if (genPrompts.length === 0) {
-        updateTask({ loading: false, error: '未能解析生成提示词' });
+        updateTask({ loading: false, error: `LLM 返回格式不正确（重试${MAX_CUSTOM_RETRIES}次后仍未能解析生图提示词）` });
         return;
       }
 
@@ -1472,42 +1547,62 @@ ${analysisText}`;
         : basePrompt;
 
       const llmApiUrl = prov.baseUrl.replace('/images/generations', '/chat/completions');
-      const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
-        apiUrl: llmApiUrl,
-        apiKey: prov.apiKey,
-        model: llmConfig.model,
-        prompt: enhancedPrompt,
-        imageBase64,
-      });
-
-      if (llmResult.error) {
-        updateTask({ loading: false, error: llmResult.error });
-        return;
-      }
-
-      const analysisText = llmResult.content;
-
-      const groupPrompts: string[] = [];
-      const groupTitles: string[] = [];
-      const groupRegex = /### 生成提示词 - 分组(\d+)\s*([\s\S]*?)(?=### 生成提示词 - 分组\d+|$)/g;
-      let match;
-      while ((match = groupRegex.exec(analysisText)) !== null) {
-        groupTitles.push(`分组${match[1]}`);
-        groupPrompts.push(match[2].trim());
-      }
-
-      if (groupPrompts.length === 0) {
-        const promptMatch = analysisText.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
-        if (promptMatch?.[1]) {
-          groupPrompts.push(promptMatch[1].trim());
-          groupTitles.push('提取结果');
+      
+      // LLM 调用 + 解析重试机制
+      const MAX_LLM_RETRIES = 3;
+      let groupPrompts: string[] = [];
+      let groupTitles: string[] = [];
+      let analysisText = '';
+      let lastLlmContent = '';
+      
+      const parseGroupPrompts = (text: string): [string[], string[]] => {
+        const promptList: string[] = [];
+        const titleList: string[] = [];
+        const groupRegex = /### 生成提示词\s*[-–—]\s*分组(\d+)\s*([\s\S]*?)(?=### 生成提示词|$)/g;
+        let m;
+        while ((m = groupRegex.exec(text)) !== null) {
+          titleList.push(`分组${m[1]}`);
+          promptList.push(m[2].trim());
         }
+        if (promptList.length === 0) {
+          const promptMatch = text.match(/### 生成提示词[\s\S]*?([\s\S]+?)$/);
+          if (promptMatch?.[1]) {
+            promptList.push(promptMatch[1].trim());
+            titleList.push('提取结果');
+          }
+        }
+        return [promptList, titleList];
+      };
+
+      for (let llmAttempt = 1; llmAttempt <= MAX_LLM_RETRIES; llmAttempt++) {
+        const actualPrompt = llmAttempt > 1
+          ? `${enhancedPrompt}\n\n【格式修正提醒 - 第${llmAttempt}次重试】你上一次的输出缺少正确的"### 生成提示词 - 分组N"标记。请严格按照输出格式，每个分组必须以"### 生成提示词 - 分组N"开头（N为数字，如"### 生成提示词 - 分组1"）。`
+          : enhancedPrompt;
+
+        const llmResult = await invoke<{ content: string; error: string | null }>('llm_chat', {
+          apiUrl: llmApiUrl,
+          apiKey: prov.apiKey,
+          model: llmConfig.model,
+          prompt: actualPrompt,
+          imageBase64,
+        });
+
+        if (llmResult.error) {
+          updateTask({ loading: false, error: llmResult.error });
+          return;
+        }
+
+        lastLlmContent = llmResult.content;
+        [groupPrompts, groupTitles] = parseGroupPrompts(lastLlmContent);
+        if (groupPrompts.length > 0) break;
       }
 
       if (groupPrompts.length === 0) {
-        updateTask({ loading: false, error: '未能解析生成提示词', resultText: analysisText });
+        updateTask({ loading: false, error: `LLM 返回格式不正确（重试${MAX_LLM_RETRIES}次后仍未能解析生图提示词）`, resultText: lastLlmContent });
         return;
       }
+
+      analysisText = lastLlmContent;
 
       const displayAnalysis = analysisText
         .replace(/### 生成提示词 - 分组\d+[\s\S]*?$/gm, '')
