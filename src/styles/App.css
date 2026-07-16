@@ -4737,14 +4737,208 @@
   border-radius: 6px;
 }
 
-/* Conv rename input */
-.conv-rename-input {
-  width: 100%;
-  padding: 4px 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  color: var(--text-primary);
+/* ── PSD Tab ─────────────────────────────────────────────────────────── */
+
+.psd-tab {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.psd-sidebar {
+  width: 260px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+
+.psd-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.psd-welcome-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  justify-content: center;
+}
+
+.psd-content {
+  display: flex;
+  gap: 20px;
+  height: 100%;
+  min-height: 0;
+}
+
+.psd-preview-panel {
+  flex: 0 0 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.psd-layers-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.psd-panel-title {
   font-size: 13px;
-  outline: none;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.psd-size-badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.psd-source-frame {
+  border-radius: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  min-height: 160px;
+}
+
+.psd-source-frame img {
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+.psd-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.psd-analysis {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.psd-status {
+  font-size: 12px;
+  color: var(--accent, #6ca8ff);
+  margin-bottom: 8px;
+}
+
+.psd-error {
+  font-size: 12px;
+  color: var(--error, #e74c3c);
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+
+.psd-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  padding: 16px;
+  text-align: center;
+}
+
+.psd-layer-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.psd-layer-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
+.psd-layer-item:hover {
+  background: var(--bg-primary);
+  border-color: var(--border);
+}
+
+.psd-layer-item.active {
+  background: var(--bg-primary);
+  border-color: var(--accent, #6ca8ff);
+}
+
+.psd-layer-item.hidden-layer {
+  opacity: 0.55;
+}
+
+.psd-layer-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.psd-layer-thumb.placeholder {
+  background: repeating-conic-gradient(#555 0% 25%, #444 0% 50%) 50% / 8px 8px;
+}
+
+.psd-layer-meta {
+  min-width: 0;
+}
+
+.psd-layer-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.psd-layer-size {
+  font-size: 11px;
+  color: var(--text-secondary);
 }

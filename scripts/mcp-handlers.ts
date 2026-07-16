@@ -262,6 +262,221 @@ function httpRequest(options: any, body: string): Promise<{ status: number; body
   });
 }
 
+function isNanoBananaModel(model: string): boolean {
+  const m = model.toLowerCase().replace(/_/g, '-');
+  return m.includes('nano-banana') || m.includes('nanobanana') || (m.includes('gemini') && m.includes('image'));
+}
+
+function gcd(a: number, b: number): number {
+  while (b) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return Math.max(a, 1);
+}
+
+function normalizeAspectRatio(size: string): string {
+  const s = size.trim();
+  if (s.includes(':')) return s;
+  const upper = s.toUpperCase();
+  if (['512', '1K', '2K', '4K'].includes(upper)) return '1:1';
+  const parts = s.toLowerCase().split('x');
+  if (parts.length === 2) {
+    const w = parseInt(parts[0], 10);
+    const h = parseInt(parts[1], 10);
+    if (w > 0 && h > 0) {
+      const candidates: Array<[number, string]> = [
+        [1, '1:1'], [2 / 3, '2:3'], [3 / 2, '3:2'], [3 / 4, '3:4'], [4 / 3, '4:3'],
+        [4 / 5, '4:5'], [5 / 4, '5:4'], [9 / 16, '9:16'], [16 / 9, '16:9'], [21 / 9, '21:9'],
+      ];
+      const g = gcd(w, h);
+      const exact = `${w / g}:${h / g}`;
+      if (candidates.some(([, r]) => r === exact)) return exact;
+      const ratio = w / h;
+      candidates.sort((a, b) => Math.abs(a[0] - ratio) - Math.abs(b[0] - ratio));
+      return candidates[0][1];
+    }
+  }
+  return '1:1';
+}
+
+function normalizeImageSize(size: string): string {
+  const s = size.trim();
+  const upper = s.toUpperCase();
+  if (['512', '1K', '2K', '4K'].includes(upper)) return upper === '512' ? '512' : upper;
+  const parts = s.toLowerCase().split('x');
+  if (parts.length === 2) {
+    const w = parseInt(parts[0], 10);
+    const h = parseInt(parts[1], 10);
+    if (w > 0 && h > 0) {
+      const long = Math.max(w, h);
+      if (long >= 3000) return '4K';
+      if (long >= 1600) return '2K';
+      if (long >= 700) return '1K';
+      return '512';
+    }
+  }
+  return '1K';
+}
+
+function deriveApiOrigin(apiUrl: string): string {
+  try {
+    const u = new URL(apiUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return apiUrl.replace(/\/v1(?:beta)?\/.*$/, '').replace(/\/$/, '');
+  }
+}
+
+function extractImagesFromJson(value: any): string[] {
+  const images: string[] = [];
+  if (value?.result_url) images.push(value.result_url);
+  if (Array.isArray(value?.data)) {
+    for (const item of value.data) {
+      if (item?.b64_json) images.push(`data:image/png;base64,${item.b64_json}`);
+      else if (item?.url) images.push(item.url);
+    }
+  }
+  if (Array.isArray(value?.candidates)) {
+    for (const cand of value.candidates) {
+      for (const part of cand?.content?.parts || []) {
+        const inline = part?.inlineData || part?.inline_data;
+        if (inline?.data) {
+          const mime = inline.mimeType || inline.mime_type || 'image/png';
+          images.push(`data:${mime};base64,${inline.data}`);
+        }
+        const fileUri = part?.fileData?.fileUri || part?.file_data?.file_uri;
+        if (fileUri) images.push(fileUri);
+      }
+    }
+  }
+  if (Array.isArray(value?.choices)) {
+    for (const choice of value.choices) {
+      const msg = choice?.message;
+      if (!msg) continue;
+      for (const img of msg.images || []) {
+        const url = img?.image_url?.url || img?.url;
+        if (url) images.push(url);
+        else if (img?.b64_json) images.push(`data:image/png;base64,${img.b64_json}`);
+      }
+      if (typeof msg.content === 'string') {
+        if (msg.content.startsWith('data:image') || msg.content.startsWith('http')) {
+          images.push(msg.content);
+        }
+      } else if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          const url = part?.image_url?.url || part?.imageUrl?.url;
+          if (url) images.push(url);
+          const inline = part?.inlineData || part?.inline_data;
+          if (inline?.data) {
+            const mime = inline.mimeType || inline.mime_type || 'image/png';
+            images.push(`data:${mime};base64,${inline.data}`);
+          }
+        }
+      }
+    }
+  }
+  return images;
+}
+
+function looksLikeAccountRestricted(err: string): boolean {
+  const lower = err.toLowerCase();
+  return lower.includes('account access is restricted')
+    || lower.includes('access is restricted')
+    || lower.includes('permission_denied');
+}
+
+function cleanBase64Payload(raw: string): string {
+  let s = raw.replace(/\s+/g, '').replace(/"/g, '');
+  const idx = s.indexOf('base64,');
+  if (idx >= 0) s = s.slice(idx + 'base64,'.length);
+  if (s.startsWith('base64:')) s = s.slice('base64:'.length);
+  while (s.length % 4 !== 0) s += '=';
+  return s;
+}
+
+function mimeFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  return 'image/png';
+}
+
+function normalizeRefImage(img: string): string {
+  const trimmed = (img || '').trim();
+  if (!trimmed) throw new Error('空的参考图');
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+  if (trimmed.startsWith('data:')) {
+    const comma = trimmed.indexOf(',');
+    const meta = comma >= 0 ? trimmed.slice(5, comma) : 'image/png';
+    const mime = meta.split(';')[0] || 'image/png';
+    const cleaned = cleanBase64Payload(comma >= 0 ? trimmed.slice(comma + 1) : trimmed);
+    Buffer.from(cleaned, 'base64');
+    return `data:${mime};base64,${cleaned}`;
+  }
+  if (fs.existsSync(trimmed) && fs.statSync(trimmed).isFile()) {
+    const buf = fs.readFileSync(trimmed);
+    return `data:${mimeFromPath(trimmed)};base64,${buf.toString('base64')}`;
+  }
+  // Windows path that isn't readable yet
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.includes('\\')) {
+    throw new Error(`参考图文件不存在: ${trimmed}`);
+  }
+  const cleaned = cleanBase64Payload(trimmed);
+  Buffer.from(cleaned, 'base64');
+  return `data:image/png;base64,${cleaned}`;
+}
+
+function normalizeRefImages(refs?: string[]): string[] | undefined {
+  if (!refs || refs.length === 0) return undefined;
+  return refs.map((img, i) => {
+    try {
+      return normalizeRefImage(img);
+    } catch (e: any) {
+      throw new Error(`参考图 #${i + 1}: ${e.message || e}`);
+    }
+  });
+}
+
+function summarizeNanoBananaFailure(gemini?: string | null, chat?: string | null, images?: string | null): string {
+  const all = [gemini, chat, images].filter(Boolean) as string[];
+  if (all.some(looksLikeAccountRestricted)) {
+    return 'Nano Banana 上游账号被限制（Account access is restricted）。\n这通常是中转站的 Gemini/Banana 渠道被封或未开通，不是本地请求格式错误。\n建议：\n1. 在中转后台换一条可用的 Gemini 出图渠道 / 分组；\n2. 或换一个已开通 nano-banana 的 API Key；\n3. 临时改用 gpt-image / dall-e 等 Images 接口模型。';
+  }
+  return `Nano Banana 生图失败\n- Gemini: ${gemini || '未尝试/无图片'}\n- Chat: ${chat || '未尝试/无图片'}\n- Images: ${images || '未尝试/无图片'}`;
+}
+
+async function postJson(urlStr: string, apiKey: string, body: any, timeoutMs = 300000): Promise<{ status: number; body: string }> {
+  const url = new URL(urlStr);
+  const payload = JSON.stringify(body);
+  const options = {
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname + url.search,
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload, 'utf-8'),
+    },
+  };
+  return new Promise((resolve, reject) => {
+    const lib = options.protocol === 'http:' ? http : https;
+    const req = lib.request(options, (res: any) => {
+      let data = '';
+      res.on('data', (chunk: string) => data += chunk);
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function callImageApi(
   apiUrl: string,
   apiKey: string,
@@ -278,159 +493,154 @@ async function callImageApi(
   process.stderr.write(`[${apiCallId}] model: ${model}, size: ${size}\n`);
   process.stderr.write(`[${apiCallId}] prompt: ${prompt.slice(0, 100)}${prompt.length > 100 ? '...' : ''}\n`);
 
-  if (referenceImages && referenceImages.length > 0) {
-    process.stderr.write(`[${apiCallId}] referenceImages count: ${referenceImages.length}\n`);
-    referenceImages.forEach((img, idx) => {
-      const prefix = img.slice(0, 80);
-      const isDataUri = img.startsWith('data:');
-      const isUrl = img.startsWith('http://') || img.startsWith('https://');
-      const hasComma = img.includes(',');
-      process.stderr.write(`[${apiCallId}]   [${idx + 1}] type=${isDataUri ? 'dataURI' : isUrl ? 'URL' : 'rawBase64'}, len=${img.length}, hasComma=${hasComma}\n`);
-      process.stderr.write(`[${apiCallId}]   [${idx + 1}] preview: ${prefix}${img.length > 80 ? '...' : ''}\n`);
-    });
-  } else {
-    process.stderr.write(`[${apiCallId}] referenceImages: none\n`);
-  }
-
-  const payload = JSON.stringify({
-    model,
-    prompt,
-    reference_images: referenceImages && referenceImages.length > 0 ? referenceImages : undefined,
-    size,
-    n: 1,
-    response_format: 'b64_json',
-  });
-
-  process.stderr.write(`[${apiCallId}] payload size: ${payload.length} bytes\n`);
-
-  // Dump a debug report (not the full base64) to file
-  const debugDir = path.join(homedir(), '.opencode', 'image-gen-debug');
+  let refs: string[] | undefined;
   try {
-    fs.mkdirSync(debugDir, { recursive: true });
-    const debugReport = {
-      timestamp: new Date().toISOString(),
-      apiCallId,
-      apiUrl,
-      model,
-      size,
-      promptLen: prompt.length,
-      hasRefImages: !!(referenceImages && referenceImages.length > 0),
-      refImageCount: referenceImages?.length || 0,
-      refImageSummary: referenceImages?.map((img, i) => ({
-        idx: i + 1,
-        len: img.length,
-        type: img.startsWith('http') ? 'URL' : img.startsWith('data:') ? 'dataURI' : 'rawBase64',
-        first50: img.slice(0, 50),
-        last30: img.slice(-30),
-        hasComma: img.includes(','),
-      })) || [],
-    };
-    fs.writeFileSync(
-      path.join(debugDir, `req_${apiCallId}.json`),
-      JSON.stringify(debugReport, null, 2),
-    );
-    process.stderr.write(`[${apiCallId}] debug report written to: ${path.join(debugDir, `req_${apiCallId}.json`)}\n`);
+    refs = normalizeRefImages(referenceImages);
   } catch (e: any) {
-    process.stderr.write(`[${apiCallId}] failed to write debug report: ${e.message}\n`);
+    return { images: [], error: e.message || String(e) };
   }
+  process.stderr.write(`[${apiCallId}] referenceImages: ${refs ? String(refs.length) : 'none'}\n`);
 
-  const url = new URL(apiUrl);
-  const bodyBytes = Buffer.byteLength(payload, 'utf-8');
-  const options = {
-    protocol: url.protocol,
-    hostname: url.hostname,
-    port: url.port || (url.protocol === 'https:' ? 443 : 80),
-    path: url.pathname + url.search,
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'Content-Length': bodyBytes,
-    },
+  const tryParseImages = async (label: string, url: string, body: any): Promise<{ images: string[]; error: string | null }> => {
+    try {
+      process.stderr.write(`[${apiCallId}] trying ${label}: ${url}\n`);
+      const resp = await postJson(url, apiKey, body, 300000);
+      process.stderr.write(`[${apiCallId}] ${label} status: ${resp.status}\n`);
+      if (resp.status < 200 || resp.status >= 300) {
+        return { images: [], error: `${label} HTTP ${resp.status}: ${resp.body.slice(0, 500)}` };
+      }
+      const parsed = JSON.parse(resp.body);
+      if (parsed.status === 'FAILED' || parsed.status === 'ERROR') {
+        return { images: [], error: parsed.fail_reason || resp.body };
+      }
+      let images = extractImagesFromJson(parsed);
+      if (images.length === 0 && parsed.task_id) {
+        const pollUrl = new URL(`${apiUrl.replace(/\/generations$/, '')}/${parsed.task_id}`);
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          onKeepalive?.();
+          const pollOpts = {
+            protocol: pollUrl.protocol,
+            hostname: pollUrl.hostname,
+            port: pollUrl.port || (pollUrl.protocol === 'https:' ? 443 : 80),
+            path: pollUrl.pathname + pollUrl.search,
+            method: 'GET',
+            headers: { Authorization: `Bearer ${apiKey}` },
+          };
+          try {
+            const pollResp = await httpRequest(pollOpts, '');
+            const pollData = JSON.parse(pollResp.body);
+            if (pollData.status === 'SUCCESS' || pollData.status === 'succeeded' || pollData.status === 'completed') {
+              images = extractImagesFromJson(pollData);
+              if (images.length) break;
+            } else if (pollData.status === 'FAILED' || pollData.status === 'ERROR' || pollData.status === 'failed') {
+              return { images: [], error: pollData.fail_reason || 'Generation failed' };
+            }
+          } catch {}
+        }
+        if (!images.length) return { images: [], error: 'Generation timeout (5 minutes)' };
+      }
+      if (!images.length) {
+        return { images: [], error: `${label} 未返回图片: ${resp.body.slice(0, 300)}` };
+      }
+      return { images, error: null };
+    } catch (e: any) {
+      return { images: [], error: `${label} failed: ${e.message}` };
+    }
   };
 
   try {
-    const resp = await httpRequest(options, payload);
-    process.stderr.write(`[${apiCallId}] response status: ${resp.status}\n`);
+    if (isNanoBananaModel(model)) {
+      const aspectRatio = normalizeAspectRatio(size);
+      const imageSize = normalizeImageSize(size);
+      const origin = deriveApiOrigin(apiUrl);
 
-    if (resp.status !== 200) {
-      process.stderr.write(`[${apiCallId}] ERROR response body: ${resp.body.slice(0, 1000)}\n`);
-      let errMsg = `HTTP ${resp.status}: ${resp.body.slice(0, 500)}`;
-      if (referenceImages && referenceImages.length > 0 && resp.status === 400) {
-        errMsg += `\n[ref_images debug]`
-          + referenceImages.map((r, i) => {
-            const first4bytes = Buffer.from(r.slice(0, 10), 'utf-8').toString('hex');
-            const fmt = r.startsWith('http') ? 'URL' : r.startsWith('data:') ? 'dataURI' : r.length > 1000 ? `rawB64(len=${r.length})` : `short(len=${r.length})`;
-            return `\n  #${i + 1}: format=${fmt} first40="${r.slice(0, 40)}" hex[0:10]=${first4bytes}`;
-          }).join('');
-      }
-      process.stderr.write(`[${apiCallId}] returning error: ${errMsg}\n`);
-      process.stderr.write(`${'='.repeat(60)}\n\n`);
-      return { images: [], error: errMsg };
-    }
-
-    process.stderr.write(`[${apiCallId}] response size: ${resp.body.length} bytes\n`);
-    const genResp = JSON.parse(resp.body);
-
-    if (genResp.status === 'FAILED' || genResp.status === 'ERROR') {
-      return { images: [], error: genResp.fail_reason || resp.body };
-    }
-
-    let images: string[] = [];
-
-    if (genResp.result_url) {
-      images.push(genResp.result_url);
-    }
-
-    if (images.length === 0 && genResp.data && Array.isArray(genResp.data)) {
-      for (const item of genResp.data) {
-        if (item.b64_json) {
-          images.push(`data:image/png;base64,${item.b64_json}`);
-        } else if (item.url) {
-          images.push(item.url);
+      const geminiParts: any[] = [{ text: prompt }];
+      if (refs) {
+        for (const img of refs) {
+          if (img.startsWith('http://') || img.startsWith('https://')) {
+            geminiParts.push({ fileData: { fileUri: img, mimeType: 'image/png' } });
+          } else {
+            const comma = img.indexOf(',');
+            const mime = img.startsWith('data:')
+              ? (img.slice(5, comma >= 0 ? comma : undefined).split(';')[0] || 'image/png')
+              : 'image/png';
+            const raw = cleanBase64Payload(comma >= 0 ? img.slice(comma + 1) : img);
+            geminiParts.push({ inlineData: { mimeType: mime, data: raw } });
+          }
         }
       }
+      const gemini = await tryParseImages(
+        'Gemini',
+        `${origin}/v1beta/models/${model}:generateContent`,
+        {
+          contents: [{ role: 'user', parts: geminiParts }],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE'],
+            imageConfig: { aspectRatio, imageSize },
+          },
+        },
+      );
+      if (!gemini.error && gemini.images.length) return gemini;
+      if (gemini.error && looksLikeAccountRestricted(gemini.error)) {
+        return { images: [], error: summarizeNanoBananaFailure(gemini.error, null, null) };
+      }
+
+      const content: any[] = [{ type: 'text', text: prompt }];
+      if (refs) {
+        for (const img of refs) {
+          const urlVal = img.startsWith('http') || img.startsWith('data:') ? img : `data:image/png;base64,${img}`;
+          content.push({ type: 'image_url', image_url: { url: urlVal } });
+        }
+      }
+      const chatUrl = apiUrl.includes('/images/generations')
+        ? apiUrl.replace('/images/generations', '/chat/completions')
+        : `${origin}/v1/chat/completions`;
+      const chat = await tryParseImages('Chat', chatUrl, {
+        model,
+        stream: false,
+        messages: [{ role: 'user', content }],
+        modalities: ['text', 'image'],
+      });
+      if (!chat.error && chat.images.length) return chat;
+      if (chat.error && looksLikeAccountRestricted(chat.error)) {
+        return { images: [], error: summarizeNanoBananaFailure(gemini.error, chat.error, null) };
+      }
+
+      // new-api 对 Gemini 图像模型常拒绝 /images/generations；仅作少数兼容站兜底
+      const bananaBody: any = {
+        model,
+        prompt,
+        size: aspectRatio,
+        aspect_ratio: aspectRatio,
+        image_size: imageSize,
+        imageSize,
+        n: 1,
+        response_format: 'url',
+        extra_fields: { aspect_ratio: aspectRatio, image_size: imageSize },
+      };
+      if (refs) {
+        bananaBody.image = refs;
+        bananaBody.image_urls = refs;
+        bananaBody.reference_images = refs;
+        bananaBody.extra_fields.reference_images = refs;
+      }
+      const openai = await tryParseImages('Images', apiUrl, bananaBody);
+      if (!openai.error && openai.images.length) return openai;
+      return {
+        images: [],
+        error: summarizeNanoBananaFailure(gemini.error, chat.error, openai.error),
+      };
     }
 
-    if (images.length === 0 && genResp.task_id) {
-      const pollUrl = new URL(`${apiUrl.replace(/\/generations$/, '')}/${genResp.task_id}`);
-      for (let i = 0; i < 60; i++) {
-        await new Promise(r => setTimeout(r, 5000));
-        onKeepalive?.();
-        const pollOpts = {
-          protocol: pollUrl.protocol,
-          hostname: pollUrl.hostname,
-          port: pollUrl.port || (pollUrl.protocol === 'https:' ? 443 : 80),
-          path: pollUrl.pathname + pollUrl.search,
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${apiKey}` },
-        };
-        try {
-          const pollResp = await httpRequest(pollOpts, '');
-          const pollData = JSON.parse(pollResp.body);
-          if (pollData.status === 'SUCCESS') {
-            if (pollData.result_url) {
-              images.push(pollData.result_url);
-              break;
-            }
-            if (pollData.data && Array.isArray(pollData.data)) {
-              for (const item of pollData.data) {
-                if (item.b64_json) images.push(`data:image/png;base64,${item.b64_json}`);
-                else if (item.url) images.push(item.url);
-              }
-              break;
-            }
-          } else if (pollData.status === 'FAILED' || pollData.status === 'ERROR') {
-            return { images: [], error: pollData.fail_reason || 'Generation failed' };
-          }
-        } catch {}
-      }
-      if (images.length === 0) {
-        return { images: [], error: 'Generation timeout (5 minutes)' };
-      }
-    }
-
-    return { images, error: null };
+    return await tryParseImages('Images', apiUrl, {
+      model,
+      prompt,
+      reference_images: refs,
+      size,
+      n: 1,
+      response_format: 'b64_json',
+    });
   } catch (e: any) {
     return { images: [], error: `Request failed: ${e.message}` };
   }

@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
 use tauri::Manager;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+const MCP_PORT: u16 = 3845;
 
 // ──────────────────────────── Shared State ────────────────────────────────
 
@@ -152,23 +158,6 @@ struct GenRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct GenResponse {
-    status: Option<String>,
-    result_url: Option<String>,
-    fail_reason: Option<String>,
-    progress: Option<String>,
-    task_id: Option<String>,
-    id: Option<serde_json::Value>,
-    data: Option<Vec<ImageData>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct ImageData {
-    b64_json: Option<String>,
-    url: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ImgResult {
     images: Vec<String>,
     error: Option<String>,
@@ -207,13 +196,907 @@ pub struct ModelInfo {
 
 fn is_image_model(id: &str) -> bool {
     let lower = id.to_lowercase();
+    if is_nano_banana_model(&lower) {
+        return true;
+    }
     let image_keywords = [
         "image", "dall-e", "dalle", "gpt-image", "flux", "stable-diffusion",
         "sdxl", "midjourney", "kandinsky", "playground", "kolors", "cogview",
-        "wan", "ideogram", "recraft", "black-forest-labs", "stability",
+        "ideogram", "recraft", "black-forest-labs", "stability",
         "seedream", "jimeng", "qwen-image", "tongyi-wanxiang", "minimax-image",
+        // "wanx" / 通义万相；避免过短 "wan" 误匹配
+        "wanx", "wanxiang",
     ];
     image_keywords.iter().any(|kw| lower.contains(kw))
+}
+
+fn is_nano_banana_model(model: &str) -> bool {
+    let m = model.to_lowercase().replace('_', "-");
+    m.contains("nano-banana")
+        || m.contains("nanobanana")
+        || (m.contains("gemini") && m.contains("image"))
+}
+
+fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a.max(1)
+}
+
+fn normalize_aspect_ratio(size: &str) -> String {
+    let s = size.trim();
+    if s.contains(':') {
+        return s.to_string();
+    }
+    let upper = s.to_uppercase();
+    if matches!(upper.as_str(), "512" | "1K" | "2K" | "4K") {
+        return "1:1".to_string();
+    }
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split('x').collect();
+    if parts.len() == 2 {
+        if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            if w > 0 && h > 0 {
+                return nearest_aspect_ratio(w, h);
+            }
+        }
+    }
+    "1:1".to_string()
+}
+
+fn nearest_aspect_ratio(w: u32, h: u32) -> String {
+    const CANDIDATES: &[(f64, &str)] = &[
+        (1.0, "1:1"),
+        (2.0 / 3.0, "2:3"),
+        (3.0 / 2.0, "3:2"),
+        (3.0 / 4.0, "3:4"),
+        (4.0 / 3.0, "4:3"),
+        (4.0 / 5.0, "4:5"),
+        (5.0 / 4.0, "5:4"),
+        (9.0 / 16.0, "9:16"),
+        (16.0 / 9.0, "16:9"),
+        (21.0 / 9.0, "21:9"),
+    ];
+    let ratio = w as f64 / h as f64;
+    let g = gcd_u32(w, h);
+    let exact = format!("{}:{}", w / g, h / g);
+    if CANDIDATES.iter().any(|(_, r)| *r == exact) {
+        return exact;
+    }
+    CANDIDATES
+        .iter()
+        .min_by(|a, b| {
+            (a.0 - ratio)
+                .abs()
+                .partial_cmp(&(b.0 - ratio).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(_, r)| (*r).to_string())
+        .unwrap_or_else(|| "1:1".to_string())
+}
+
+fn normalize_image_size(size: &str) -> String {
+    let s = size.trim();
+    let upper = s.to_uppercase();
+    if matches!(upper.as_str(), "512" | "1K" | "2K" | "4K") {
+        return if upper == "512" { "512".into() } else { upper };
+    }
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split('x').collect();
+    if parts.len() == 2 {
+        if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            let long = w.max(h);
+            return if long >= 3000 {
+                "4K".into()
+            } else if long >= 1600 {
+                "2K".into()
+            } else if long >= 700 {
+                "1K".into()
+            } else {
+                "512".into()
+            };
+        }
+    }
+    "1K".into()
+}
+
+fn derive_api_origin(api_url: &str) -> String {
+    if let Ok(u) = reqwest::Url::parse(api_url) {
+        let port = u
+            .port()
+            .map(|p| format!(":{}", p))
+            .unwrap_or_default();
+        return format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or(""), port);
+    }
+    api_url
+        .split("/v1/")
+        .next()
+        .or_else(|| api_url.split("/v1beta/").next())
+        .unwrap_or(api_url)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn derive_gemini_generate_url(api_url: &str, model: &str) -> String {
+    format!(
+        "{}/v1beta/models/{}:generateContent",
+        derive_api_origin(api_url),
+        model
+    )
+}
+
+fn derive_chat_completions_url(api_url: &str) -> String {
+    if api_url.contains("/images/generations") {
+        return api_url.replace("/images/generations", "/chat/completions");
+    }
+    if api_url.contains("/image_generation") {
+        return api_url.replace("/image_generation", "/chat/completions");
+    }
+    format!("{}/v1/chat/completions", derive_api_origin(api_url))
+}
+
+fn split_data_uri(data: &str) -> (String, String) {
+    if let Some(rest) = data.strip_prefix("data:") {
+        if let Some((meta, b64)) = rest.split_once(',') {
+            let mime = meta.split(';').next().unwrap_or("image/png");
+            return (mime.to_string(), b64.to_string());
+        }
+    }
+    ("image/png".into(), data.to_string())
+}
+
+fn clean_base64_payload(raw: &str) -> String {
+    let mut s: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '"')
+        .collect();
+    // 去掉误带的 data-uri / base64: 前缀
+    if let Some(idx) = s.find("base64,") {
+        s = s[idx + "base64,".len()..].to_string();
+    }
+    if let Some(rest) = s.strip_prefix("base64:") {
+        s = rest.to_string();
+    }
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    s
+}
+
+fn mime_from_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+}
+
+fn file_to_data_uri(path: &std::path::Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("读取参考图失败 {}: {}", path.display(), e))?;
+    if bytes.is_empty() {
+        return Err(format!("参考图为空文件: {}", path.display()));
+    }
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime_from_path(path), b64))
+}
+
+fn looks_like_local_path(s: &str) -> bool {
+    let p = std::path::Path::new(s);
+    if p.is_file() {
+        return true;
+    }
+    // Windows / Unix 路径形态（未即时存在时也尽量识别，避免当 base64 发出去）
+    if s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic() {
+        return true;
+    }
+    s.starts_with("\\\\")
+        || s.starts_with("./")
+        || s.starts_with(".\\")
+        || s.starts_with('/')
+        || s.contains('\\')
+}
+
+/// 把参考图统一成 http(s) URL 或标准 data URI（纯 STANDARD base64，带 padding）
+fn normalize_ref_image(img: &str) -> Result<String, String> {
+    let trimmed = img.trim();
+    if trimmed.is_empty() {
+        return Err("空的参考图".into());
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.starts_with("data:") {
+        let (mime, b64) = split_data_uri(trimmed);
+        let cleaned = clean_base64_payload(&b64);
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(&cleaned)
+            .map_err(|e| format!("invalid base64 image data ({e})"))?;
+        return Ok(format!("data:{};base64,{}", mime, cleaned));
+    }
+    if looks_like_local_path(trimmed) {
+        let path = std::path::Path::new(trimmed);
+        if path.is_file() {
+            return file_to_data_uri(path);
+        }
+        return Err(format!("参考图文件不存在: {}", trimmed));
+    }
+    // 裸 base64
+    let cleaned = clean_base64_payload(trimmed);
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .map_err(|_| {
+            format!(
+                "无法识别的参考图（既不是 URL/dataURI/本地文件，也不是合法 base64）: {}",
+                &trimmed[..trimmed.len().min(60)]
+            )
+        })?;
+    Ok(format!("data:image/png;base64,{}", cleaned))
+}
+
+fn normalize_ref_images(refs: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {
+    let Some(list) = refs.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for (i, img) in list.iter().enumerate() {
+        out.push(normalize_ref_image(img).map_err(|e| format!("参考图 #{}: {}", i + 1, e))?);
+    }
+    Ok(Some(out))
+}
+
+fn build_gemini_image_payload(
+    prompt: &str,
+    size: &str,
+    reference_images: &Option<Vec<String>>,
+) -> serde_json::Value {
+    let aspect_ratio = normalize_aspect_ratio(size);
+    let image_size = normalize_image_size(size);
+    let mut parts: Vec<serde_json::Value> = vec![serde_json::json!({ "text": prompt })];
+    if let Some(refs) = reference_images {
+        for img in refs {
+            if img.starts_with("http://") || img.starts_with("https://") {
+                parts.push(serde_json::json!({
+                    "fileData": { "fileUri": img, "mimeType": "image/png" }
+                }));
+            } else {
+                let (mime, b64) = split_data_uri(img);
+                let cleaned = clean_base64_payload(&b64);
+                parts.push(serde_json::json!({
+                    "inlineData": { "mimeType": mime, "data": cleaned }
+                }));
+            }
+        }
+    }
+    serde_json::json!({
+        "contents": [{ "role": "user", "parts": parts }],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": aspect_ratio,
+                "imageSize": image_size
+            }
+        }
+    })
+}
+
+fn build_openai_banana_payload(
+    model: &str,
+    prompt: &str,
+    size: &str,
+    reference_images: &Option<Vec<String>>,
+) -> serde_json::Value {
+    let aspect_ratio = normalize_aspect_ratio(size);
+    let image_size = normalize_image_size(size);
+    let mut body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        // 多数中转对 nano-banana 期望 size=宽高比，而不是 1280x720
+        "size": aspect_ratio,
+        "aspect_ratio": aspect_ratio,
+        "image_size": image_size,
+        "imageSize": image_size,
+        "n": 1,
+        // url 比 b64_json 更不容易踩中转 SSE / tool 通道问题
+        "response_format": "url",
+    });
+    if let Some(refs) = reference_images {
+        if !refs.is_empty() {
+            body["image"] = serde_json::json!(refs);
+            body["image_urls"] = serde_json::json!(refs);
+            body["reference_images"] = serde_json::json!(refs);
+            body["extra_fields"] = serde_json::json!({
+                "reference_images": refs,
+                "aspect_ratio": aspect_ratio,
+                "image_size": image_size
+            });
+        } else {
+            body["extra_fields"] = serde_json::json!({
+                "aspect_ratio": aspect_ratio,
+                "image_size": image_size
+            });
+        }
+    } else {
+        body["extra_fields"] = serde_json::json!({
+            "aspect_ratio": aspect_ratio,
+            "image_size": image_size
+        });
+    }
+    body
+}
+
+fn extract_images_from_json(value: &serde_json::Value) -> Vec<String> {
+    let mut images = Vec::new();
+
+    if let Some(url) = value.get("result_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        images.push(url.to_string());
+    }
+
+    if let Some(arr) = value.get("data").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()) {
+                images.push(format!("data:image/png;base64,{}", b64));
+            } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
+                images.push(url.to_string());
+            }
+        }
+    }
+
+    // Gemini generateContent
+    if let Some(candidates) = value.get("candidates").and_then(|v| v.as_array()) {
+        for cand in candidates {
+            if let Some(parts) = cand
+                .pointer("/content/parts")
+                .and_then(|v| v.as_array())
+            {
+                for part in parts {
+                    let inline = part.get("inlineData").or_else(|| part.get("inline_data"));
+                    if let Some(inline) = inline {
+                        if let Some(b64) = inline.get("data").and_then(|v| v.as_str()) {
+                            let mime = inline
+                                .get("mimeType")
+                                .or_else(|| inline.get("mime_type"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("image/png");
+                            images.push(format!("data:{};base64,{}", mime, b64));
+                        }
+                    }
+                    if let Some(url) = part
+                        .pointer("/fileData/fileUri")
+                        .or_else(|| part.pointer("/file_data/file_uri"))
+                        .and_then(|v| v.as_str())
+                    {
+                        images.push(url.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // chat/completions multimodal image replies
+    if let Some(choices) = value.get("choices").and_then(|v| v.as_array()) {
+        for choice in choices {
+            let message = choice.get("message");
+            if let Some(msg) = message {
+                if let Some(imgs) = msg.get("images").and_then(|v| v.as_array()) {
+                    for img in imgs {
+                        if let Some(url) = img
+                            .pointer("/image_url/url")
+                            .or_else(|| img.get("url"))
+                            .and_then(|v| v.as_str())
+                        {
+                            images.push(url.to_string());
+                        } else if let Some(b64) = img.get("b64_json").and_then(|v| v.as_str()) {
+                            images.push(format!("data:image/png;base64,{}", b64));
+                        }
+                    }
+                }
+                match msg.get("content") {
+                    Some(serde_json::Value::String(s)) => {
+                        // markdown image or bare data uri
+                        if s.starts_with("data:image") || s.starts_with("http") {
+                            images.push(s.clone());
+                        }
+                        for cap in s.split("](").skip(1) {
+                            if let Some(end) = cap.find(')') {
+                                let url = &cap[..end];
+                                if url.starts_with("http") || url.starts_with("data:image") {
+                                    images.push(url.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Some(serde_json::Value::Array(parts)) => {
+                        for part in parts {
+                            if let Some(url) = part
+                                .pointer("/image_url/url")
+                                .or_else(|| part.pointer("/imageUrl/url"))
+                                .and_then(|v| v.as_str())
+                            {
+                                images.push(url.to_string());
+                            }
+                            let inline = part.get("inlineData").or_else(|| part.get("inline_data"));
+                            if let Some(inline) = inline {
+                                if let Some(b64) = inline.get("data").and_then(|v| v.as_str()) {
+                                    let mime = inline
+                                        .get("mimeType")
+                                        .or_else(|| inline.get("mime_type"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("image/png");
+                                    images.push(format!("data:{};base64,{}", mime, b64));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    images
+}
+
+fn looks_like_imagen_only_reject(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("only imagen models are supported")
+        || lower.contains("not supported model for image generation")
+        || lower.contains("convert_request_failed")
+}
+
+fn looks_like_account_restricted(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("account access is restricted")
+        || lower.contains("access is restricted")
+        || lower.contains("permission_denied")
+}
+
+fn looks_like_bad_base64(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("invalid base64")
+        || lower.contains("incorrect padding")
+        || lower.contains("illegal base64")
+        || lower.contains("failed to decode base64")
+}
+
+fn summarize_nano_banana_failure(
+    gemini_err: Option<&str>,
+    chat_err: Option<&str>,
+    images_err: Option<&str>,
+) -> String {
+    let all = [gemini_err, chat_err, images_err]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if all.iter().any(|e| looks_like_account_restricted(e)) {
+        return "Nano Banana 上游账号被限制（Account access is restricted）。\n\
+这通常是中转站的 Gemini/Banana 渠道被封或未开通，不是本地请求格式错误。\n\
+建议：\n\
+1. 在中转后台换一条可用的 Gemini 出图渠道 / 分组；\n\
+2. 或换一个已开通 nano-banana 的 API Key；\n\
+3. 临时改用 gpt-image / dall-e 等 Images 接口模型。"
+            .to_string();
+    }
+    if all.iter().any(|e| looks_like_bad_base64(e)) {
+        return format!(
+            "参考图 base64 无效（常见原因：传入了本地文件路径，或 dataURI 未正确剥离）。\n\
+- Gemini: {}\n- Chat: {}",
+            gemini_err.unwrap_or("未尝试"),
+            chat_err.unwrap_or("未尝试"),
+        );
+    }
+    if images_err.is_some_and(looks_like_imagen_only_reject)
+        && gemini_err.is_some()
+        && chat_err.is_some()
+    {
+        return format!(
+            "Nano Banana 生图失败：当前中转的 /images/generations 只支持 Imagen，\
+Gemini 路径也失败。\n- Gemini: {}\n- Chat: {}",
+            gemini_err.unwrap_or("无图片"),
+            chat_err.unwrap_or("无图片"),
+        );
+    }
+    format!(
+        "Nano Banana 生图失败\n- Gemini: {}\n- Chat: {}\n- Images: {}",
+        gemini_err.unwrap_or("未尝试/无图片"),
+        chat_err.unwrap_or("未尝试/无图片"),
+        images_err.unwrap_or("未尝试/无图片"),
+    )
+}
+
+async fn post_json_for_images(
+    url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    timeout_secs: u64,
+) -> Result<(u16, String), String> {
+    let request = HTTP_CLIENT
+        .post(url)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(body);
+
+    let resp = send_with_retry(request, 1).await.map_err(|e| {
+        if e.is_timeout() {
+            "请求超时，请检查网络连接".to_string()
+        } else if e.is_connect() {
+            format!("无法连接到服务器: {}", e)
+        } else {
+            format!("请求失败: {}", e)
+        }
+    })?;
+
+    let status = resp.status().as_u16();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+    Ok((status, text))
+}
+
+async fn poll_task_images(
+    api_url: &str,
+    api_key: &str,
+    task_id: &str,
+) -> Result<Vec<String>, String> {
+    let poll_url = format!("{}/{}", api_url.trim_end_matches("/generations"), task_id);
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let poll_request = HTTP_CLIENT
+            .get(&poll_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .timeout(std::time::Duration::from_secs(30));
+        let poll_resp = send_with_retry(poll_request, 2)
+            .await
+            .map_err(|e| format!("轮询失败: {}", e))?;
+        let poll_text = poll_resp
+            .text()
+            .await
+            .map_err(|e| format!("读取轮询响应失败: {}", e))?;
+        let poll_data: serde_json::Value = serde_json::from_str(&poll_text)
+            .map_err(|e| format!("解析轮询响应失败: {}", e))?;
+        let status = poll_data
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if status == "SUCCESS" || status == "succeeded" || status == "completed" {
+            let images = extract_images_from_json(&poll_data);
+            if !images.is_empty() {
+                return Ok(images);
+            }
+        } else if status == "FAILED" || status == "ERROR" || status == "failed" {
+            let reason = poll_data
+                .get("fail_reason")
+                .or_else(|| poll_data.pointer("/error/message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("生成失败");
+            return Err(reason.to_string());
+        }
+    }
+    Err("生成超时（5分钟），请稍后重试".into())
+}
+
+async fn generate_via_openai_images(
+    api_url: &str,
+    api_key: &str,
+    payload: &serde_json::Value,
+    timeout_secs: u64,
+) -> ImgResult {
+    match post_json_for_images(api_url, api_key, payload, timeout_secs).await {
+        Ok((status, body_text)) => {
+            if !(200..300).contains(&status) {
+                return ImgResult {
+                    images: vec![],
+                    error: Some(format!("HTTP {}: {}", status, body_text)),
+                };
+            }
+            let value: serde_json::Value = match serde_json::from_str(&body_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ImgResult {
+                        images: vec![],
+                        error: Some(format!(
+                            "解析响应失败: {} | body: {}",
+                            e,
+                            &body_text[..body_text.len().min(500)]
+                        )),
+                    };
+                }
+            };
+            if let Some(s) = value.get("status").and_then(|v| v.as_str()) {
+                if s == "FAILED" || s == "ERROR" {
+                    return ImgResult {
+                        images: vec![],
+                        error: Some(
+                            value
+                                .get("fail_reason")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&body_text)
+                                .to_string(),
+                        ),
+                    };
+                }
+            }
+            let mut images = extract_images_from_json(&value);
+            if images.is_empty() {
+                if let Some(task_id) = value
+                    .get("task_id")
+                    .or_else(|| value.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    match poll_task_images(api_url, api_key, task_id).await {
+                        Ok(imgs) => images = imgs,
+                        Err(e) => {
+                            return ImgResult {
+                                images: vec![],
+                                error: Some(e),
+                            }
+                        }
+                    }
+                }
+            }
+            if images.is_empty() {
+                ImgResult {
+                    images: vec![],
+                    error: Some(format!("生图未返回图片: {}", &body_text[..body_text.len().min(300)])),
+                }
+            } else {
+                ImgResult {
+                    images,
+                    error: None,
+                }
+            }
+        }
+        Err(e) => ImgResult {
+            images: vec![],
+            error: Some(e),
+        },
+    }
+}
+
+async fn generate_via_gemini_native(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    size: &str,
+    reference_images: &Option<Vec<String>>,
+) -> ImgResult {
+    let url = derive_gemini_generate_url(api_url, model);
+    let payload = build_gemini_image_payload(prompt, size, reference_images);
+    match post_json_for_images(&url, api_key, &payload, 300).await {
+        Ok((status, body_text)) => {
+            if !(200..300).contains(&status) {
+                return ImgResult {
+                    images: vec![],
+                    error: Some(format!("Gemini HTTP {}: {}", status, body_text)),
+                };
+            }
+            let value: serde_json::Value = match serde_json::from_str(&body_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ImgResult {
+                        images: vec![],
+                        error: Some(format!(
+                            "解析 Gemini 响应失败: {} | body: {}",
+                            e,
+                            &body_text[..body_text.len().min(500)]
+                        )),
+                    };
+                }
+            };
+            let images = extract_images_from_json(&value);
+            if images.is_empty() {
+                // 常见：安全拦截时仍返回 200 + 文本
+                let text_hint = value
+                    .pointer("/candidates/0/content/parts/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&body_text[..body_text.len().min(200)]);
+                ImgResult {
+                    images: vec![],
+                    error: Some(format!("Gemini 未返回图片: {}", text_hint)),
+                }
+            } else {
+                ImgResult {
+                    images,
+                    error: None,
+                }
+            }
+        }
+        Err(e) => ImgResult {
+            images: vec![],
+            error: Some(e),
+        },
+    }
+}
+
+async fn generate_via_chat_modalities(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    reference_images: &Option<Vec<String>>,
+) -> ImgResult {
+    let url = derive_chat_completions_url(api_url);
+    let mut content: Vec<serde_json::Value> =
+        vec![serde_json::json!({ "type": "text", "text": prompt })];
+    if let Some(refs) = reference_images {
+        for img in refs {
+            let url_val = if img.starts_with("http") || img.starts_with("data:") {
+                img.clone()
+            } else {
+                format!("data:image/png;base64,{}", img)
+            };
+            content.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": url_val }
+            }));
+        }
+    }
+    let payload = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [{ "role": "user", "content": content }],
+        "modalities": ["text", "image"]
+    });
+    match post_json_for_images(&url, api_key, &payload, 300).await {
+        Ok((status, body_text)) => {
+            if !(200..300).contains(&status) {
+                return ImgResult {
+                    images: vec![],
+                    error: Some(format!("Chat HTTP {}: {}", status, body_text)),
+                };
+            }
+            let value: serde_json::Value = match serde_json::from_str(&body_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ImgResult {
+                        images: vec![],
+                        error: Some(format!(
+                            "解析 Chat 响应失败: {} | body: {}",
+                            e,
+                            &body_text[..body_text.len().min(500)]
+                        )),
+                    };
+                }
+            };
+            let images = extract_images_from_json(&value);
+            if images.is_empty() {
+                ImgResult {
+                    images: vec![],
+                    error: Some(format!(
+                        "Chat 未返回图片: {}",
+                        &body_text[..body_text.len().min(300)]
+                    )),
+                }
+            } else {
+                ImgResult {
+                    images,
+                    error: None,
+                }
+            }
+        }
+        Err(e) => ImgResult {
+            images: vec![],
+            error: Some(e),
+        },
+    }
+}
+
+async fn do_generate_image(
+    api_url: String,
+    api_key: String,
+    model: String,
+    prompt: String,
+    size: String,
+    n: u32,
+    reference_images: Option<Vec<String>>,
+    response_format: String,
+) -> ImgResult {
+    let refs = match normalize_ref_images(reference_images) {
+        Ok(r) => r,
+        Err(e) => {
+            return ImgResult {
+                images: vec![],
+                error: Some(e),
+            }
+        }
+    };
+
+    if is_nano_banana_model(&model) {
+        // Nano Banana = Gemini 多模态出图，不是 Imagen；new-api 的 /images/generations 通常会直接拒绝。
+        // 优先 Gemini 原生，再 Chat；Images 仅作少数兼容站兜底。
+        let gemini = generate_via_gemini_native(
+            &api_url,
+            &api_key,
+            &model,
+            &prompt,
+            &size,
+            &refs,
+        )
+        .await;
+        if gemini.error.is_none() && !gemini.images.is_empty() {
+            return gemini;
+        }
+
+        // 账号受限时无需继续打其它入口，避免叠一堆误导错误
+        if gemini
+            .error
+            .as_deref()
+            .is_some_and(looks_like_account_restricted)
+        {
+            return ImgResult {
+                images: vec![],
+                error: Some(summarize_nano_banana_failure(
+                    gemini.error.as_deref(),
+                    None,
+                    None,
+                )),
+            };
+        }
+
+        let chat = generate_via_chat_modalities(&api_url, &api_key, &model, &prompt, &refs).await;
+        if chat.error.is_none() && !chat.images.is_empty() {
+            return chat;
+        }
+        if chat
+            .error
+            .as_deref()
+            .is_some_and(looks_like_account_restricted)
+        {
+            return ImgResult {
+                images: vec![],
+                error: Some(summarize_nano_banana_failure(
+                    gemini.error.as_deref(),
+                    chat.error.as_deref(),
+                    None,
+                )),
+            };
+        }
+
+        // 少数中转仍用 OpenAI Images 包装 banana；若返回 only imagen 则忽略该路径
+        let banana_payload = build_openai_banana_payload(&model, &prompt, &size, &refs);
+        let openai = generate_via_openai_images(&api_url, &api_key, &banana_payload, 300).await;
+        if openai.error.is_none() && !openai.images.is_empty() {
+            return openai;
+        }
+        let images_err = openai.error.as_deref().filter(|e| !looks_like_imagen_only_reject(e));
+
+        return ImgResult {
+            images: vec![],
+            error: Some(summarize_nano_banana_failure(
+                gemini.error.as_deref(),
+                chat.error.as_deref(),
+                images_err.or(openai.error.as_deref()),
+            )),
+        };
+    }
+
+    // 默认 OpenAI Images 路径
+    let payload = GenRequest {
+        model: model.clone(),
+        prompt: prompt.clone(),
+        reference_images: refs,
+        size: size.clone(),
+        n,
+        response_format: response_format.clone(),
+    };
+    let value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({}));
+    generate_via_openai_images(&api_url, &api_key, &value, 180).await
 }
 
 fn detect_resolution(id: &str) -> Option<String> {
@@ -298,16 +1181,6 @@ fn save_conv_to_disk(app: &tauri::AppHandle, conv: &Conversation) {
 
 // ──────────────────────────── Helpers ────────────────────────────────────
 
-fn extract_images(data: Vec<ImageData>) -> Vec<String> {
-    data.into_iter()
-        .filter_map(|item| {
-            item.b64_json
-                .map(|b64| format!("data:image/png;base64,{}", b64))
-                .or(item.url)
-        })
-        .collect()
-}
-
 async fn generate_single(
     api_url: String,
     api_key: String,
@@ -317,128 +1190,17 @@ async fn generate_single(
     reference_images: Option<Vec<String>>,
     response_format: String,
 ) -> ImgResult {
-    let payload = GenRequest {
-        model: model.clone(),
-        prompt: prompt.clone(),
-        reference_images: reference_images.filter(|v| !v.is_empty()),
-        size: size.clone(),
-        n: 1,
-        response_format: response_format.clone(),
-    };
-
-    let request = HTTP_CLIENT
-        .post(&api_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&payload);
-
-    let resp = match send_with_retry(request, 2).await {
-        Ok(r) => r,
-        Err(e) => {
-            let msg = if e.is_timeout() {
-                "请求超时，请检查网络连接".to_string()
-            } else if e.is_connect() {
-                format!("无法连接到服务器: {}", e)
-            } else {
-                format!("请求失败: {}", e)
-            };
-            return ImgResult { images: vec![], error: Some(msg) };
-        }
-    };
-
-    let status = resp.status();
-    let body_text = match resp.text().await {
-        Ok(t) => t,
-        Err(e) => return ImgResult { images: vec![], error: Some(format!("读取响应失败: {}", e)) },
-    };
-
-    if !status.is_success() {
-        return ImgResult { images: vec![], error: Some(format!("HTTP {}: {}", status, body_text)) };
-    }
-
-    let gen_resp: GenResponse = match serde_json::from_str(&body_text) {
-        Ok(r) => r,
-        Err(e) => {
-            return ImgResult {
-                images: vec![],
-                error: Some(format!("解析响应失败: {} | body: {}", e, &body_text[..body_text.len().min(500)])),
-            };
-        }
-    };
-
-    if let Some(ref s) = gen_resp.status {
-        if s == "FAILED" || s == "ERROR" {
-            return ImgResult {
-                images: vec![],
-                error: Some(gen_resp.fail_reason.unwrap_or_else(|| body_text.clone())),
-            };
-        }
-    }
-
-    let mut images = Vec::new();
-
-    if let Some(url) = gen_resp.result_url.filter(|u| !u.is_empty()) {
-        images.push(url);
-    }
-
-    if images.is_empty() {
-        if let Some(data_arr) = gen_resp.data {
-            images = extract_images(data_arr);
-        }
-    }
-
-    if images.is_empty() && gen_resp.task_id.is_some() {
-        let task_id = gen_resp.task_id.unwrap();
-        let poll_url = format!("{}/{}", api_url.trim_end_matches("/generations"), task_id);
-
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-            let poll_request = HTTP_CLIENT
-                .get(&poll_url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .timeout(std::time::Duration::from_secs(30));
-
-            let poll_resp = match send_with_retry(poll_request, 2).await {
-                Ok(r) => r,
-                Err(e) => return ImgResult { images: vec![], error: Some(format!("轮询失败: {}", e)) },
-            };
-
-            let poll_text = match poll_resp.text().await {
-                Ok(t) => t,
-                Err(e) => return ImgResult { images: vec![], error: Some(format!("读取轮询响应失败: {}", e)) },
-            };
-
-            let poll_data: GenResponse = match serde_json::from_str(&poll_text) {
-                Ok(d) => d,
-                Err(e) => return ImgResult { images: vec![], error: Some(format!("解析轮询响应失败: {}", e)) },
-            };
-
-            if let Some(ref s) = poll_data.status {
-                if s == "SUCCESS" {
-                    if let Some(url) = poll_data.result_url.filter(|u| !u.is_empty()) {
-                        images.push(url);
-                        break;
-                    }
-                    if let Some(data_arr) = poll_data.data {
-                        images = extract_images(data_arr);
-                        break;
-                    }
-                } else if s == "FAILED" || s == "ERROR" {
-                    return ImgResult {
-                        images: vec![],
-                        error: Some(poll_data.fail_reason.unwrap_or_else(|| "生成失败".to_string())),
-                    };
-                }
-            }
-        }
-
-        if images.is_empty() {
-            return ImgResult { images: vec![], error: Some("生成超时（5分钟），请稍后重试".to_string()) };
-        }
-    }
-
-    ImgResult { images, error: None }
+    do_generate_image(
+        api_url,
+        api_key,
+        model,
+        prompt,
+        size,
+        1,
+        reference_images,
+        response_format,
+    )
+    .await
 }
 
 // ──────────────────────────── Commands ────────────────────────────────────
@@ -463,101 +1225,17 @@ async fn generate_image(
     reference_images: Option<Vec<String>>,
     response_format: String,
 ) -> Result<ImgResult, String> {
-    let payload = GenRequest {
-        model: model.clone(),
-        prompt: prompt.clone(),
-        reference_images: reference_images.filter(|v| !v.is_empty()),
-        size: size.clone(),
+    Ok(do_generate_image(
+        api_url,
+        api_key,
+        model,
+        prompt,
+        size,
         n,
-        response_format: response_format.clone(),
-    };
-
-    let request = HTTP_CLIENT
-        .post(&api_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&payload);
-
-    let resp = send_with_retry(request, 2).await.map_err(|e| {
-        if e.is_timeout() { "请求超时，请检查网络连接".to_string() }
-        else if e.is_connect() { format!("无法连接到服务器: {}", e) }
-        else { format!("请求失败: {}", e) }
-    })?;
-
-    let status = resp.status();
-    let body_text = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-
-    if !status.is_success() {
-        return Ok(ImgResult { images: vec![], error: Some(format!("HTTP {}: {}", status, body_text)) });
-    }
-
-    let gen_resp: GenResponse = serde_json::from_str(&body_text)
-        .map_err(|e| format!("解析响应失败: {} | body: {}", e, &body_text[..body_text.len().min(500)]))?;
-
-    if let Some(ref s) = gen_resp.status {
-        if s == "FAILED" || s == "ERROR" {
-            return Ok(ImgResult {
-                images: vec![],
-                error: Some(gen_resp.fail_reason.unwrap_or_else(|| body_text.clone())),
-            });
-        }
-    }
-
-    let mut images = Vec::new();
-
-    if let Some(url) = gen_resp.result_url.filter(|u| !u.is_empty()) {
-        images.push(url);
-    }
-
-    if images.is_empty() {
-        if let Some(data_arr) = gen_resp.data {
-            images = extract_images(data_arr);
-        }
-    }
-
-    if images.is_empty() && gen_resp.task_id.is_some() {
-        let task_id = gen_resp.task_id.unwrap();
-        let poll_url = format!("{}/{}", api_url.trim_end_matches("/generations"), task_id);
-
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-            let poll_request = HTTP_CLIENT
-                .get(&poll_url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .timeout(std::time::Duration::from_secs(30));
-
-            let poll_resp = send_with_retry(poll_request, 2).await
-                .map_err(|e| format!("轮询失败: {}", e))?;
-            let poll_text = poll_resp.text().await.map_err(|e| format!("读取轮询响应失败: {}", e))?;
-            let poll_data: GenResponse = serde_json::from_str(&poll_text)
-                .map_err(|e| format!("解析轮询响应失败: {}", e))?;
-
-            if let Some(ref s) = poll_data.status {
-                if s == "SUCCESS" {
-                    if let Some(url) = poll_data.result_url.filter(|u| !u.is_empty()) {
-                        images.push(url);
-                        break;
-                    }
-                    if let Some(data_arr) = poll_data.data {
-                        images = extract_images(data_arr);
-                        break;
-                    }
-                } else if s == "FAILED" || s == "ERROR" {
-                    return Ok(ImgResult {
-                        images: vec![],
-                        error: Some(poll_data.fail_reason.unwrap_or_else(|| "生成失败".to_string())),
-                    });
-                }
-            }
-        }
-
-        if images.is_empty() {
-            return Ok(ImgResult { images: vec![], error: Some("生成超时（5分钟），请稍后重试".to_string()) });
-        }
-    }
-
-    Ok(ImgResult { images, error: None })
+        reference_images,
+        response_format,
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -1467,7 +2145,141 @@ fn get_mcp_server_url() -> Result<String, String> {
     socket.connect("8.8.8.8:80").map_err(|e| e.to_string())?;
     let local_ip = socket.local_addr().map_err(|e| e.to_string())?.ip().to_string();
     drop(socket);
-    Ok(format!("http://{}:3845/mcp", local_ip))
+    Ok(format!("http://{}:{}/mcp", local_ip, MCP_PORT))
+}
+
+// ──────────────────────────── MCP HTTP Server Lifecycle ────────────────────
+
+struct McpServerState(Mutex<Option<Child>>);
+
+impl Default for McpServerState {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+fn is_mcp_port_listening(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        std::time::Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
+fn resolve_project_root() -> Option<PathBuf> {
+    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .to_path_buf();
+    if from_manifest.join("scripts/mcp-http-server.ts").exists() {
+        return Some(from_manifest);
+    }
+
+    let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for _ in 0..8 {
+        if dir.join("scripts/mcp-http-server.ts").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn find_node_executable() -> Option<PathBuf> {
+    let probe = |cmd: &Path| {
+        let mut command = Command::new(cmd);
+        command.arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        command.status().ok().map(|s| s.success()).unwrap_or(false)
+    };
+
+    if probe(Path::new("node")) {
+        return Some(PathBuf::from("node"));
+    }
+
+    #[cfg(windows)]
+    {
+        let candidates: Vec<PathBuf> = [
+            std::env::var("ProgramFiles").ok().map(|p| PathBuf::from(p).join("nodejs").join("node.exe")),
+            std::env::var("ProgramFiles(x86)").ok().map(|p| PathBuf::from(p).join("nodejs").join("node.exe")),
+            std::env::var("LOCALAPPDATA").ok().map(|p| PathBuf::from(p).join("Programs").join("node").join("node.exe")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        for candidate in candidates {
+            if candidate.exists() && probe(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn spawn_mcp_http_server(state: &McpServerState) {
+    if is_mcp_port_listening(MCP_PORT) {
+        eprintln!("[mcp] Port {} already in use, skipping auto-start", MCP_PORT);
+        return;
+    }
+
+    let root = match resolve_project_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("[mcp] Could not find scripts/mcp-http-server.ts");
+            return;
+        }
+    };
+
+    let script = root.join("scripts").join("mcp-http-server.ts");
+    let tsx_cli = root.join("node_modules").join("tsx").join("dist").join("cli.mjs");
+    if !tsx_cli.exists() {
+        eprintln!("[mcp] tsx not found; run npm install in project root first");
+        return;
+    }
+
+    let node = match find_node_executable() {
+        Some(n) => n,
+        None => {
+            eprintln!("[mcp] Node.js not found; install Node.js to auto-start MCP server");
+            return;
+        }
+    };
+
+    let mut cmd = Command::new(&node);
+    cmd.arg(&tsx_cli)
+        .arg(&script)
+        .current_dir(&root)
+        .env("MCP_PORT", MCP_PORT.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+
+    match cmd.spawn() {
+        Ok(child) => {
+            eprintln!("[mcp] Starting HTTP server on port {}", MCP_PORT);
+            if let Ok(mut guard) = state.0.lock() {
+                *guard = Some(child);
+            }
+        }
+        Err(err) => eprintln!("[mcp] Failed to start HTTP server: {}", err),
+    }
+}
+
+fn stop_mcp_http_server(state: &McpServerState) {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("[mcp] HTTP server stopped");
+        }
+    }
 }
 
 // ──────────────────────────── LLM Commands ─────────────────────────────────
@@ -1675,9 +2487,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState(Arc::new(Mutex::new(Inner::default()))))
+        .manage(McpServerState::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner().clone();
+            let mcp_state = app.state::<McpServerState>();
+            spawn_mcp_http_server(&mcp_state);
 
             migrate_old_conversations(&app_handle);
             let saved_convs = load_all_conversations(&app_handle);
@@ -1729,6 +2544,13 @@ pub fn run() {
             save_extract_sessions,
             load_extract_sessions,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(mcp_state) = app_handle.try_state::<McpServerState>() {
+                    stop_mcp_http_server(&mcp_state);
+                }
+            }
+        });
 }

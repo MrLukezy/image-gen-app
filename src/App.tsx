@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask, VideoConversation } from './types';
+import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask, VideoConversation, PsdConversation } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import { EXTRACT_TOOLS, EXTRACT_CATEGORIES, getToolById } from './extractTools';
 import {
@@ -14,6 +14,7 @@ import {
   getFavoriteFolders, saveFavoriteFolders,
   getFavorites, saveFavorites, addFavorite, removeFavorite, updateFavorite,
   getVideoConversations, saveVideoConversations,
+  getPsdConversations, savePsdConversations,
   PROVIDER_PRESETS,
   type Provider,
   type McpConfig,
@@ -25,6 +26,7 @@ import './styles/App.css';
 import LocalImage from './LocalImage';
 import AnimationTab from './AnimationTab';
 import VideoTab from './VideoTab';
+import PsdTab from './PsdTab';
 import type { AnimationConversation } from './types';
 
 const SIZE_OPTIONS = [
@@ -39,6 +41,33 @@ const SIZE_OPTIONS = [
   { label: '2:3', value: '672x1008' },
   { label: '21:9', value: '1344x576' },
 ];
+
+function isNanoBananaModel(modelName: string): boolean {
+  const m = modelName.toLowerCase().replace(/_/g, '-');
+  return m.includes('nano-banana') || m.includes('nanobanana') || (m.includes('gemini') && m.includes('image'));
+}
+
+/** Nano Banana 中转更认宽高比；其它模型继续用 WxH */
+function resolveGenSize(modelName: string, sizeValue: string): string {
+  if (!isNanoBananaModel(modelName)) return sizeValue;
+  const opt = SIZE_OPTIONS.find(o => o.value === sizeValue);
+  return opt?.label || sizeValue;
+}
+
+/** 历史会话落盘后参考图可能是本地路径；统一转成 data URI 再发给后端 */
+async function ensureRefDataUris(images?: string[]): Promise<string[] | undefined> {
+  if (!images || images.length === 0) return undefined;
+  const out: string[] = [];
+  for (const img of images) {
+    if (!img) continue;
+    if (img.startsWith('data:') || img.startsWith('http://') || img.startsWith('https://')) {
+      out.push(img);
+      continue;
+    }
+    out.push(await invoke<string>('read_image_base64', { path: img }));
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
@@ -208,7 +237,7 @@ export default function App() {
   const [parallelCount, setParallelCount] = useState(1);
   const [autoContext, setAutoContext] = useState(true);
   const [showBatchDetail, setShowBatchDetail] = useState<string | null>(null);
-  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video'>('normal');
+  const [sidebarCategory, setSidebarCategory] = useState<'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video' | 'psd'>('normal');
   const [mcpConversations, setMcpConversations] = useState<McpConversation[]>([]);
   const [activeMcpSessionId, setActiveMcpSessionId] = useState<string | null>(null);
   const [mcpConfig, setMcpConfigState] = useState<McpConfig>(() => getMcpConfig());
@@ -236,6 +265,7 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('');
   const [showAddToFavMenu, setShowAddToFavMenu] = useState<{ x: number; y: number; imageUrl: string; convId?: string; entryId?: string } | null>(null);
   const [pendingExtractFromImage, setPendingExtractFromImage] = useState<string | null>(null);
+  const [pendingPsdFromImage, setPendingPsdFromImage] = useState<string | null>(null);
   const [extractNotes, setExtractNotes] = useState<Record<string, string>>({});
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
@@ -246,6 +276,11 @@ export default function App() {
     return stored.length > 0 ? (stored as VideoConversation[]) : [];
   });
   const [activeVideoConvId, setActiveVideoConvId] = useState<string | null>(null);
+  const [psdConversations, setPsdConversations] = useState<PsdConversation[]>(() => {
+    const stored = getPsdConversations();
+    return stored.length > 0 ? (stored as PsdConversation[]) : [];
+  });
+  const [activePsdConvId, setActivePsdConvId] = useState<string | null>(null);
   const mcpPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const batchProgressRef = useRef<Record<string, BatchTask[]>>({});
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -429,6 +464,10 @@ export default function App() {
   useEffect(() => {
     saveVideoConversations(videoConversations);
   }, [videoConversations]);
+
+  useEffect(() => {
+    savePsdConversations(psdConversations);
+  }, [psdConversations]);
 
   useEffect(() => {
     const activeProv = providers.find(p => p.id === mcpConfig.providerId);
@@ -649,7 +688,7 @@ export default function App() {
     }
   };
 
-  const switchSidebarCategory = (cat: 'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video') => {
+  const switchSidebarCategory = (cat: 'normal' | 'mcp' | 'extract' | 'favorites' | 'animation' | 'video' | 'psd') => {
     if (cat === sidebarCategory) return;
     if (mcpPollRef.current) {
       clearInterval(mcpPollRef.current);
@@ -665,8 +704,8 @@ export default function App() {
     } else if (cat === 'favorites') {
       setFavorites(getFavorites());
       setFavoriteFolders(getFavoriteFolders());
-    } else if (cat === 'animation' || cat === 'video') {
-      // animation/video conversations are loaded from localStorage on init
+    } else if (cat === 'animation' || cat === 'video' || cat === 'psd') {
+      // animation/video/psd conversations are loaded from localStorage on init
       setActiveMcpSessionId(null);
       setMcpBatchDetailEntryId(null);
     } else {
@@ -914,7 +953,11 @@ export default function App() {
       let lastError: string | null = null;
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', params);
+          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+            ...params,
+            size: resolveGenSize(params.model, params.size),
+            referenceImages: (await ensureRefDataUris(params.referenceImages)) || [],
+          });
           if (!result.error && result.images?.length > 0) {
             return { images: result.images, error: null, attempt };
           }
@@ -1236,9 +1279,9 @@ export default function App() {
             apiKey: prov.apiKey,
             apiUrl: genApiUrl,
             model,
-            size: '1024x1024',
+            size: resolveGenSize(model, '1024x1024'),
             n: 1,
-            referenceImages: [imageBase64],
+            referenceImages: (await ensureRefDataUris([imageBase64])) || [],
             responseFormat: 'b64_json',
           });
           if (genResult.error || !genResult.images?.[0]) {
@@ -1517,7 +1560,11 @@ ${analysisText}`;
       let lastError: string | null = null;
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', params);
+          const result = await invoke<{ images: string[]; error: string | null }>('generate_image', {
+            ...params,
+            size: resolveGenSize(params.model, params.size),
+            referenceImages: (await ensureRefDataUris(params.referenceImages)) || [],
+          });
           if (!result.error && result.images?.length > 0) {
             return { images: result.images, error: null, attempt };
           }
@@ -1752,6 +1799,12 @@ ${analysisText}`;
     setPendingExtractFromImage(imageUrl);
   };
 
+  const handleExportPsdFromContextMenu = (imageUrl: string) => {
+    setContextMenu(null);
+    setSidebarCategory('psd');
+    setPendingPsdFromImage(imageUrl);
+  };
+
   // ── LLM Models Fetch ──────────────────────────────────────────────────
   const fetchLlmModels = async () => {
     const prov = providers.find(p => p.id === llmConfig.providerId);
@@ -1897,9 +1950,9 @@ ${analysisText}`;
           apiKey,
           apiUrl,
           model,
-          size,
+          size: resolveGenSize(model, size),
           n: 1,
-          referenceImages: refImages,
+          referenceImages: await ensureRefDataUris(refImages),
           responseFormat: 'b64_json',
         },
       );
@@ -2011,6 +2064,17 @@ ${analysisText}`;
     const startTime = Date.now();
     const BATCH_SIZE = 5;
     const allResults: ({ images: string[]; error: string | null } | null)[] = Array(parallelCount).fill(null);
+    let normalizedRefs: string[] | undefined;
+    try {
+      normalizedRefs = await ensureRefDataUris(refImages);
+    } catch (err) {
+      // 参考图规范化失败时整批失败
+      for (let i = 0; i < parallelCount; i++) {
+        allResults[i] = { images: [], error: String(err) };
+        updateEntryError(batchId, i, String(err));
+      }
+    }
+    if (normalizedRefs !== undefined || !refImages?.length) {
     for (let batchStart = 0; batchStart < parallelCount; batchStart += BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, parallelCount);
       const promises: Promise<void>[] = [];
@@ -2018,8 +2082,8 @@ ${analysisText}`;
         const idx = i;
         promises.push(
           invoke<{ images: string[]; error: string | null }>('generate_image', {
-            prompt: enrichedPrompt, apiKey, apiUrl, model, size, n: 1,
-            referenceImages: refImages, responseFormat: 'b64_json',
+            prompt: enrichedPrompt, apiKey, apiUrl, model, size: resolveGenSize(model, size), n: 1,
+            referenceImages: normalizedRefs, responseFormat: 'b64_json',
           }).then(result => {
             allResults[idx] = result;
             if (result.images && result.images.length > 0) updateEntryImages(batchId, idx, result.images[0]);
@@ -2031,6 +2095,7 @@ ${analysisText}`;
         );
       }
       await Promise.allSettled(promises);
+    }
     }
     if (cancelledRef.current && activeConvIdRef.current === convId) return;
     const endTime = Date.now();
@@ -2173,6 +2238,12 @@ ${analysisText}`;
                 onClick={() => switchSidebarCategory('video')}
               >
                 视频
+              </button>
+              <button
+                className={`sidebar-cat-tab ${sidebarCategory === 'psd' ? 'active' : ''}`}
+                onClick={() => switchSidebarCategory('psd')}
+              >
+                PSD
               </button>
             </div>
             <button
@@ -3417,6 +3488,53 @@ ${analysisText}`;
               setActiveConvId={setActiveVideoConvId}
             />
           </>
+        ) : sidebarCategory === 'psd' ? (
+          <>
+            <header className="app-header">
+              <div className="header-left">
+                {!showSidebar && (
+                  <button className="header-icon-btn" onClick={() => setShowSidebar(true)} title="展开侧边栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+                <div className="logo">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                  </svg>
+                </div>
+                <h1 className="app-title">PSD 分层</h1>
+                <span className="model-badge">{psdConversations.length} 个会话</span>
+              </div>
+              <div className="header-right">
+                <div className="window-controls">
+                  <button className="win-ctrl" onClick={() => invoke('window_minimize')} title="最小化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="5.5" width="8" height="1" fill="currentColor" /></svg>
+                  </button>
+                  <button className="win-ctrl" onClick={() => invoke('window_maximize')} title="最大化">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                  </button>
+                  <button className="win-ctrl win-ctrl-close" onClick={() => invoke('window_close')} title="关闭">
+                    <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
+                  </button>
+                </div>
+              </div>
+            </header>
+            <PsdTab
+              providers={providers}
+              llmConfig={llmConfig}
+              imageModel={model}
+              conversations={psdConversations}
+              setConversations={setPsdConversations}
+              activeConvId={activePsdConvId}
+              setActiveConvId={setActivePsdConvId}
+              pendingSourceImage={pendingPsdFromImage}
+              onPendingConsumed={() => setPendingPsdFromImage(null)}
+              setLightboxSrc={setLightboxSrc}
+            />
+          </>
         ) : showBatchDetail ? (
           <div className="trash-view">
             <header className="app-header">
@@ -3897,7 +4015,7 @@ ${analysisText}`;
               value={size}
               onChange={e => setSize(e.target.value)}
               disabled={isLoading}
-              title="尺寸比例"
+              title={isNanoBananaModel(model) ? 'Nano Banana 将按宽高比出图' : '尺寸比例'}
             >
               {SIZE_OPTIONS.map(opt => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -4513,6 +4631,14 @@ ${analysisText}`;
               <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
             </svg>
             提取图片
+          </button>
+          <button className="context-menu-item" onClick={() => handleExportPsdFromContextMenu(contextMenu.imageUrl)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="12" y1="18" x2="12" y2="12" /><line x1="9" y1="15" x2="15" y2="15" />
+            </svg>
+            导出 PSD
           </button>
           <div className="context-menu-divider" />
           <div className="context-menu-submenu">

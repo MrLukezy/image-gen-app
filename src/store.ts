@@ -334,3 +334,39 @@ export function getVideoConversations(): unknown[] {
 export function saveVideoConversations(sessions: unknown[]) {
   setLocal(VIDEO_CONVERSATIONS_KEY, JSON.stringify(sessions));
 }
+
+// ──────────────────────────── PSD Conversations ──────────────────────────
+
+const PSD_CONVERSATIONS_KEY = 'image_gen_psd_conversations';
+
+export function getPsdConversations(): unknown[] {
+  const raw = getLocal(PSD_CONVERSATIONS_KEY);
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {}
+  }
+  return [];
+}
+
+export function savePsdConversations(sessions: unknown[]) {
+  // 避免 dataURL 撑爆 localStorage：持久化时清空大字段，会话列表可保留元数据
+  const slim = (sessions as Array<Record<string, unknown>>).map(s => {
+    const stripLayers = (layers: unknown): unknown => {
+      if (!Array.isArray(layers)) return layers;
+      return layers.map((layer: Record<string, unknown>) => ({
+        ...layer,
+        previewDataUrl: '',
+        children: stripLayers(layer.children),
+      }));
+    };
+    const sourceImage = typeof s.sourceImage === 'string' ? s.sourceImage : '';
+    return {
+      ...s,
+      sourceImage: sourceImage.startsWith('data:') ? '' : sourceImage,
+      layers: stripLayers(s.layers),
+    };
+  });
+  setLocal(PSD_CONVERSATIONS_KEY, JSON.stringify(slim));
+}

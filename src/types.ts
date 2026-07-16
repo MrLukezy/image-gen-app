@@ -171,3 +171,34 @@ export interface VideoConversation {
   createdAt: number;
   updatedAt: number;
 }
+
+// ──────────────────────────── PSD ────────────────────────────────────────
+
+export interface PsdLayerNode {
+  id: string;
+  name: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  opacity: number;
+  hidden: boolean;
+  previewDataUrl: string;
+  children?: PsdLayerNode[];
+}
+
+export interface PsdConversation {
+  id: string;
+  title: string;
+  mode: 'import' | 'export';
+  sourceImage: string;
+  width: number;
+  height: number;
+  layers: PsdLayerNode[];
+  status: 'idle' | 'analyzing' | 'generating' | 'building' | 'done' | 'error';
+  error?: string;
+  analysisText?: string;
+  groupTitles?: string[];
+  createdAt: number;
+  updatedAt: number;
+}
