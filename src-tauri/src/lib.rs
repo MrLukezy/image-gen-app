@@ -109,6 +109,16 @@ struct ConvEntry {
     batch_images: Option<Vec<BatchTaskEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     batch_errors: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orientation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
 }
 
 // ──────────────────────────── HTTP Client ─────────────────────────────────
@@ -1941,6 +1951,33 @@ async fn read_image_base64(path: String) -> Result<String, String> {
     Ok(format!("data:{};base64,{}", mime, b64))
 }
 
+#[tauri::command]
+async fn fetch_image_base64(url: String) -> Result<String, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("URL must start with http:// or https://".to_string());
+    }
+    let bytes = download_url_bytes(&url)
+        .await
+        .ok_or_else(|| format!("Failed to download image: {}", url))?;
+    if bytes.is_empty() {
+        return Err("Downloaded image is empty".to_string());
+    }
+    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else {
+        "image/png"
+    };
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime, b64))
+}
+
 async fn save_and_extract_images(app: &tauri::AppHandle, conv_id: &str, entries: &[ConvEntry]) -> Vec<ConvEntry> {
     let img_base = match images_dir(app, conv_id) {
         Some(p) => p,
@@ -2015,15 +2052,17 @@ async fn save_and_extract_images(app: &tauri::AppHandle, conv_id: &str, entries:
 }
 
 async fn download_url_bytes(url: &str) -> Option<Vec<u8>> {
-    HTTP_CLIENT
+    let resp = HTTP_CLIENT
         .get(url)
+        .header("User-Agent", "image-gen-app/1.0")
+        .header("Accept", "image/*,*/*")
         .send()
         .await
-        .ok()?
-        .bytes()
-        .await
-        .ok()
-        .map(|b| b.to_vec())
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.bytes().await.ok().map(|b| b.to_vec())
 }
 
 // ──────────────────────────── MCP Conversation Commands ─────────────────
@@ -2520,6 +2559,7 @@ pub fn run() {
             generate_video,
             fetch_models,
             read_image_base64,
+            fetch_image_base64,
             create_conversation,
             save_conversation,
             list_conversations,

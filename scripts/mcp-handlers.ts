@@ -22,6 +22,11 @@ interface ConvEntry {
   prompt?: string;
   images?: string[];
   refImages?: string[];
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  progress?: string;
+  orientation?: string;
+  kind?: 'image' | 'video';
   error?: string;
   loading?: boolean;
   timestamp: number;
@@ -607,7 +612,7 @@ async function callImageApi(
         return { images: [], error: summarizeNanoBananaFailure(gemini.error, chat.error, null) };
       }
 
-      // new-api 对 Gemini 图像模型常拒绝 /images/generations；仅作少数兼容站兜底
+      // Prefer b64 so we can always persist locally without depending on remote URL download
       const bananaBody: any = {
         model,
         prompt,
@@ -616,7 +621,7 @@ async function callImageApi(
         image_size: imageSize,
         imageSize,
         n: 1,
-        response_format: 'url',
+        response_format: 'b64_json',
         extra_fields: { aspect_ratio: aspectRatio, image_size: imageSize },
       };
       if (refs) {
@@ -625,7 +630,11 @@ async function callImageApi(
         bananaBody.reference_images = refs;
         bananaBody.extra_fields.reference_images = refs;
       }
-      const openai = await tryParseImages('Images', apiUrl, bananaBody);
+      let openai = await tryParseImages('Images', apiUrl, bananaBody);
+      if (!openai.error && openai.images.length) return openai;
+      // Some gateways only accept url format — retry once
+      bananaBody.response_format = 'url';
+      openai = await tryParseImages('Images', apiUrl, bananaBody);
       if (!openai.error && openai.images.length) return openai;
       return {
         images: [],
@@ -646,6 +655,91 @@ async function callImageApi(
   }
 }
 
+function downloadHttpToBuffer(imageUrl: string, redirectsLeft = 5): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(imageUrl);
+    } catch {
+      return reject(new Error(`Invalid URL: ${imageUrl.slice(0, 120)}`));
+    }
+    const lib = parsed.protocol === 'http:' ? http : https;
+    const req = lib.get(
+      imageUrl,
+      {
+        timeout: 60000,
+        headers: {
+          'User-Agent': 'image-gen-app-mcp/1.0',
+          Accept: 'image/*,*/*',
+        },
+      },
+      (res: http.IncomingMessage) => {
+        const status = res.statusCode || 0;
+        if (status >= 300 && status < 400 && res.headers.location) {
+          res.resume();
+          if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+          const next = new URL(res.headers.location, imageUrl).toString();
+          downloadHttpToBuffer(next, redirectsLeft - 1).then(resolve, reject);
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          res.resume();
+          return reject(new Error(`HTTP ${status} downloading image`));
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (buf.length === 0) return reject(new Error('Empty image data'));
+          // Guard against HTML/error pages being saved as "images"
+          const head = buf.slice(0, 32).toString('utf8').toLowerCase();
+          if (head.includes('<!doctype') || head.includes('<html')) {
+            return reject(new Error('Download returned HTML instead of image'));
+          }
+          resolve(buf);
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Download timeout'));
+    });
+  });
+}
+
+async function imageDataToBuffer(imageData: string): Promise<Buffer> {
+  if (imageData.startsWith('data:')) {
+    const b64 = imageData.split(',')[1] || '';
+    if (!b64) throw new Error('Empty data URI');
+    return Buffer.from(b64, 'base64');
+  }
+  if (imageData.startsWith('http://') || imageData.startsWith('https://')) {
+    const MAX_RETRIES = 3;
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        return await downloadHttpToBuffer(imageData);
+      } catch (e: any) {
+        lastErr = e instanceof Error ? e : new Error(String(e?.message || e));
+        process.stderr.write(
+          `[saveImageToLocal] URL download attempt ${attempt + 1}/${MAX_RETRIES} failed: ${lastErr.message}\n`,
+        );
+        if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+    throw lastErr || new Error('URL download failed');
+  }
+  // raw base64
+  return Buffer.from(imageData, 'base64');
+}
+
+/**
+ * Always persist under mcp_conversations/<session>/images/ (canonical path for the app UI).
+ * If outputDir is set, also copy there for the caller's project path.
+ * Never returns a remote URL — throws if bytes cannot be obtained/written.
+ */
 async function saveImageToLocal(
   imageData: string,
   sessionId: string,
@@ -653,105 +747,78 @@ async function saveImageToLocal(
   index: number,
   outputDir?: string,
 ): Promise<string> {
-  const dir = outputDir || path.join(mcpSessionDir(sessionId), 'images');
-  fs.mkdirSync(dir, { recursive: true });
+  const sessionImgDir = path.join(mcpSessionDir(sessionId), 'images');
+  fs.mkdirSync(sessionImgDir, { recursive: true });
   const fname = `${entryId}_${index}.png`;
-  const fpath = path.join(dir, fname);
+  const sessionPath = path.join(sessionImgDir, fname);
 
-  if (imageData.startsWith('data:')) {
-    const b64 = imageData.split(',')[1] || imageData;
-    fs.writeFileSync(fpath, Buffer.from(b64, 'base64'));
-    return fpath;
-  }
+  const buf = await imageDataToBuffer(imageData);
+  if (buf.length < 32) throw new Error(`Image data too small (${buf.length} bytes)`);
+  fs.writeFileSync(sessionPath, buf);
 
-  if (imageData.startsWith('http')) {
-    const MAX_RETRIES = 3;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const url = new URL(imageData);
-          const lib = url.protocol === 'http:' ? http : https;
-          lib.get(imageData, { timeout: 30000 }, (res: any) => {
-            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              // follow redirect
-              const newUrl = new URL(res.headers.location, imageData).toString();
-              const lib2 = newUrl.startsWith('https') ? https : http;
-              lib2.get(newUrl, { timeout: 30000 }, (res2: any) => {
-                const chunks: Buffer[] = [];
-                res2.on('data', (chunk: Buffer) => chunks.push(chunk));
-                res2.on('end', () => {
-                  if (chunks.length === 0) return reject(new Error('Empty response after redirect'));
-                  fs.writeFileSync(fpath, Buffer.concat(chunks));
-                  resolve();
-                });
-                res2.on('error', reject);
-              }).on('error', reject);
-              return;
-            }
-            const chunks: Buffer[] = [];
-            res.on('data', (chunk: Buffer) => chunks.push(chunk));
-            res.on('end', () => {
-              if (chunks.length === 0) return reject(new Error('Empty image data'));
-              fs.writeFileSync(fpath, Buffer.concat(chunks));
-              resolve();
-            });
-            res.on('error', reject);
-          }).on('error', reject);
-        });
-        return fpath;
-      } catch (e: any) {
-        process.stderr.write(`[saveImageToLocal] URL download attempt ${attempt + 1}/${MAX_RETRIES} failed: ${e.message}\n`);
-        if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+  if (outputDir && outputDir.trim()) {
+    try {
+      fs.mkdirSync(outputDir, { recursive: true });
+      const outPath = path.join(outputDir, fname);
+      if (path.resolve(outPath) !== path.resolve(sessionPath)) {
+        fs.copyFileSync(sessionPath, outPath);
+        process.stderr.write(`[saveImageToLocal] Also copied to output_dir: ${outPath}\n`);
       }
+    } catch (e: any) {
+      // Session copy already succeeded — keep canonical path even if project copy fails
+      process.stderr.write(`[saveImageToLocal] output_dir copy failed: ${e.message}\n`);
     }
-    // all retries failed - save URL to a .txt so we have a traceable record, but return the URL as fallback
-    try { fs.writeFileSync(fpath.replace(/\.png$/, '.url.txt'), imageData); } catch {}
-    process.stderr.write(`[saveImageToLocal] All retries failed, returning URL: ${imageData.slice(0, 100)}\n`);
-    return imageData;
   }
 
-  // raw base64
-  try {
-    fs.writeFileSync(fpath, Buffer.from(imageData, 'base64'));
-    return fpath;
-  } catch {
-    return imageData;
-  }
+  process.stderr.write(`[saveImageToLocal] Saved ${buf.length} bytes → ${sessionPath}\n`);
+  return sessionPath;
 }
 
 async function saveRefImagesToLocal(
   rawRefImages: string[],
   sessionId: string,
   entryId: string,
-  outputDir?: string,
+  _outputDir?: string,
 ): Promise<string[]> {
   const saved: string[] = [];
-  const dir = outputDir || path.join(mcpSessionDir(sessionId), 'images');
+  const dir = path.join(mcpSessionDir(sessionId), 'images');
   fs.mkdirSync(dir, { recursive: true });
   for (let i = 0; i < rawRefImages.length; i++) {
     const img = rawRefImages[i];
     const fname = `${entryId}_ref_${i}.png`;
     const fpath = path.join(dir, fname);
     try {
-      if (img.startsWith('data:')) {
-        const b64 = img.split(',')[1];
-        if (b64) {
-          fs.writeFileSync(fpath, Buffer.from(b64, 'base64'));
-          saved.push(fpath);
-        }
-      } else if (img.startsWith('http://') || img.startsWith('https://')) {
-        saved.push(img);
+      if (img.startsWith('data:') || img.startsWith('http://') || img.startsWith('https://')) {
+        const buf = await imageDataToBuffer(img);
+        fs.writeFileSync(fpath, buf);
+        saved.push(fpath);
       } else if (fs.existsSync(img) && fs.statSync(img).isFile()) {
         fs.copyFileSync(img, fpath);
         saved.push(fpath);
       } else {
-        saved.push(img);
+        process.stderr.write(`[saveRefImagesToLocal] skip unreadable ref #${i}: ${String(img).slice(0, 80)}\n`);
       }
-    } catch {
-      saved.push(img);
+    } catch (e: any) {
+      process.stderr.write(`[saveRefImagesToLocal] failed ref #${i}: ${e.message}\n`);
     }
   }
   return saved;
+}
+
+function localPathToMcpImageContent(filePath: string): { type: 'image'; data: string; mimeType: string } | null {
+  try {
+    if (!filePath || filePath.startsWith('http') || filePath.startsWith('data:')) return null;
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return null;
+    const buf = fs.readFileSync(filePath);
+    if (buf.length === 0) return null;
+    return {
+      type: 'image',
+      data: buf.toString('base64'),
+      mimeType: detectMimeFromExt(filePath),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function detectMimeFromExt(filePath: string): string {
@@ -869,6 +936,7 @@ let currentModel = '';
 
 interface Job {
   jobId: string;
+  kind: 'image' | 'video';
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   total: number;
   completed: number;
@@ -878,6 +946,8 @@ interface Job {
   sessionId: string;
   entryId: string;
   images: string[];
+  videoUrl?: string;
+  progress?: string;
   cancelled: boolean;
 }
 
@@ -959,9 +1029,9 @@ async function handleRunParallelJob(
               const lp = await saveImageToLocal(result.images[0], sessionId, assistantId, idx, outputDir || undefined);
               batchImages[idx] = { id: idx, status: 'success', image: lp };
               allImages[idx] = lp;
-            } catch {
-              batchImages[idx] = { id: idx, status: 'success', image: result.images[0] };
-              allImages[idx] = result.images[0];
+            } catch (e: any) {
+              batchImages[idx] = { id: idx, status: 'failed', error: `Save failed: ${e?.message || e}` };
+              errorCount++;
             }
           } else {
             batchImages[idx] = { id: idx, status: 'failed', error: result.error || 'Unknown error' };
@@ -1123,23 +1193,31 @@ async function handleGenerateImage(args: any, progressToken?: string | number, s
   const endTime = nowMs();
 
   let savedImages: string[] = [];
+  const saveErrors: string[] = [];
   if (result.images.length > 0) {
     for (let i = 0; i < result.images.length; i++) {
       try {
         const localPath = await saveImageToLocal(result.images[i], sessionId, assistantId, i, outputDir || undefined);
         savedImages.push(localPath);
-      } catch {
-        savedImages.push(result.images[i]);
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        saveErrors.push(msg);
+        process.stderr.write(`[handleGenerateImage] save failed #${i}: ${msg}\n`);
       }
     }
   }
+
+  const combinedError = result.error
+    || (savedImages.length === 0 && saveErrors.length > 0
+      ? `Failed to save image locally: ${saveErrors[0]}`
+      : undefined);
 
   const finalEntry: ConvEntry = {
     id: assistantId,
     type: 'assistant',
     loading: false,
     images: savedImages.length > 0 ? savedImages : undefined,
-    error: result.error || undefined,
+    error: combinedError,
     timestamp: nowMs(),
     size,
     model,
@@ -1158,16 +1236,22 @@ async function handleGenerateImage(args: any, progressToken?: string | number, s
   conv.updatedAt = nowMs();
   saveSession(conv);
 
-  if (result.error) {
-    return { content: [{ type: 'text', text: `Image generation failed: ${result.error}` }] };
+  if (combinedError && savedImages.length === 0) {
+    return { content: [{ type: 'text', text: `Image generation failed: ${combinedError}` }] };
   }
 
-  return {
-    content: [
-      { type: 'text', text: `Generated ${savedImages.length} image(s) successfully. ${savedImages.map((p, i) => `\nImage ${i + 1}: ${p}`).join('')}` },
-      ...(savedImages.length > 0 ? [{ type: 'text', text: `Images saved to: ${outputDir || path.join(mcpSessionDir(sessionId), 'images')}` }] : []),
-    ],
-  };
+  const sessionImgDir = path.join(mcpSessionDir(sessionId), 'images');
+  const content: any[] = [
+    {
+      type: 'text',
+      text: `Generated ${savedImages.length} image(s) successfully.\n${savedImages.map((p, i) => `Image ${i + 1}: ${p}`).join('\n')}\nSession copy: ${sessionImgDir}${outputDir ? `\nAlso copied to output_dir: ${outputDir}` : ''}`,
+    },
+  ];
+  for (const p of savedImages) {
+    const imgContent = localPathToMcpImageContent(p);
+    if (imgContent) content.push(imgContent);
+  }
+  return { content };
 }
 
 async function handleParallelGenerate(args: any, progressToken?: string | number, sendNotification?: SendNotification): Promise<any> {
@@ -1254,6 +1338,7 @@ async function handleParallelGenerate(args: any, progressToken?: string | number
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     activeJobs.set(jobId, {
       jobId,
+      kind: 'image',
       status: 'running',
       total: count,
       completed: 0,
@@ -1373,9 +1458,9 @@ async function handleParallelGenerate(args: any, progressToken?: string | number
             const localPath = await saveImageToLocal(result.images[0], sessionId, assistantId, idx, outputDir || undefined);
             batchImages[idx] = { id: idx, status: 'success', image: localPath };
             allImages[idx] = localPath;
-          } catch {
-            batchImages[idx] = { id: idx, status: 'success', image: result.images[0] };
-            allImages[idx] = result.images[0];
+          } catch (e: any) {
+            batchImages[idx] = { id: idx, status: 'failed', error: `Save failed: ${e?.message || e}` };
+            errorCount++;
           }
         } else {
           batchImages[idx] = { id: idx, status: 'failed', error: result.error || 'Unknown error' };
@@ -1428,14 +1513,18 @@ async function handleParallelGenerate(args: any, progressToken?: string | number
   saveSession(conv);
 
   const successCount = allImages.filter(Boolean).length;
-  return {
-    content: [
-      {
-        type: 'text',
-        text: `Parallel generation complete: ${successCount}/${count} succeeded${errorCount > 0 ? `, ${errorCount} failed` : ''}.\n${allImages.filter(Boolean).map((p, i) => `Image ${i + 1}: ${p}`).join('\n')}`,
-      },
-    ],
-  };
+  const content: any[] = [
+    {
+      type: 'text',
+      text: `Parallel generation complete: ${successCount}/${count} succeeded${errorCount > 0 ? `, ${errorCount} failed` : ''}.\nSession images: ${path.join(mcpSessionDir(sessionId), 'images')}${outputDir ? `\nAlso copied to output_dir: ${outputDir}` : ''}\n${allImages.filter(Boolean).map((p, i) => `Image ${i + 1}: ${p}`).join('\n')}`,
+    },
+  ];
+  // Embed up to 4 images in MCP response so clients can preview without opening files
+  for (const p of allImages.filter(Boolean).slice(0, 4)) {
+    const imgContent = localPathToMcpImageContent(p);
+    if (imgContent) content.push(imgContent);
+  }
+  return { content };
 }
 
 function handleSetStyle(args: any): any {
@@ -1484,8 +1573,9 @@ function handleGetStatus(): any {
           existingSessions: all.map(c => ({ id: c.id, title: c.title, entries: c.entries.length })),
           activeJobs: runningJobs.map(j => ({
             jobId: j.jobId,
+            kind: j.kind,
             status: j.status,
-            progress: `${j.completed}/${j.total}`,
+            progress: j.kind === 'video' ? (j.progress || `${j.completed}/${j.total}`) : `${j.completed}/${j.total}`,
             errors: j.errors,
             elapsed: `${Math.round((nowMs() - j.startTime) / 1000)}s`,
           })),
@@ -1513,12 +1603,14 @@ function handleListJobs(): any {
       text: JSON.stringify({
         jobs: jobs.map(j => ({
           jobId: j.jobId,
+          kind: j.kind,
           status: j.status,
-          progress: `${j.completed}/${j.total}`,
+          progress: j.kind === 'video' ? (j.progress || `${j.completed}/${j.total}`) : `${j.completed}/${j.total}`,
           errors: j.errors,
           elapsed: j.endTime ? `${((j.endTime - j.startTime) / 1000).toFixed(1)}s` : `${Math.round((nowMs() - j.startTime) / 1000)}s`,
           sessionId: j.sessionId,
           imageCount: j.images.length,
+          videoUrl: j.videoUrl || null,
         })),
         total: jobs.length,
       }, null, 2),
@@ -1540,8 +1632,9 @@ function handleGetJobStatus(args: any): any {
       type: 'text',
       text: JSON.stringify({
         jobId: job.jobId,
+        kind: job.kind,
         status: job.status,
-        progress: `${job.completed}/${job.total}`,
+        progress: job.kind === 'video' ? (job.progress || `${job.completed}/${job.total}`) : `${job.completed}/${job.total}`,
         errors: job.errors,
         cancelled: job.cancelled,
         startTime: new Date(job.startTime).toISOString(),
@@ -1551,6 +1644,7 @@ function handleGetJobStatus(args: any): any {
           : `${Math.round((nowMs() - job.startTime) / 1000)}s`,
         sessionId: job.sessionId,
         images: job.images,
+        videoUrl: job.videoUrl || null,
       }, null, 2),
     }],
   };
@@ -1565,6 +1659,593 @@ function handleCancelJob(args: any): any {
   return {
     content: [{ type: 'text', text: ok ? `Job ${jobId} cancelled.` : `Job ${jobId} not found or not running.` }],
   };
+}
+
+// ──────────────────────────── Video Generation ────────────────────────────
+
+function deriveVideoBaseUrl(imageApiUrl: string): string {
+  if (imageApiUrl.includes('/images/generations')) {
+    return imageApiUrl.replace('/images/generations', '');
+  }
+  if (imageApiUrl.includes('/image_generation')) {
+    return imageApiUrl.replace('/image_generation', '');
+  }
+  if (imageApiUrl.endsWith('/v1')) {
+    return imageApiUrl;
+  }
+  if (imageApiUrl.endsWith('/v4')) {
+    return imageApiUrl.replace(/\/v4$/, '/v1');
+  }
+  if (imageApiUrl.includes('/v1/')) {
+    const idx = imageApiUrl.lastIndexOf('/v1/');
+    return idx >= 0 ? `${imageApiUrl.slice(0, idx)}/v1` : imageApiUrl.replace(/\/$/, '');
+  }
+  return imageApiUrl.replace(/\/$/, '');
+}
+
+async function getJson(urlStr: string, apiKey: string, timeoutMs = 30000): Promise<{ status: number; body: string }> {
+  const url = new URL(urlStr);
+  const options = {
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname + url.search,
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  };
+  return new Promise((resolve, reject) => {
+    const lib = options.protocol === 'http:' ? http : https;
+    const req = lib.request(options, (res: any) => {
+      let data = '';
+      res.on('data', (chunk: string) => data += chunk);
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.end();
+  });
+}
+
+function extractVideoUrlFromQuery(query: any): string | null {
+  if (query?.video_url && typeof query.video_url === 'string') return query.video_url;
+  if (query?.url && typeof query.url === 'string') return query.url;
+  const nested = query?.data || query?.result;
+  if (nested) {
+    if (typeof nested.video_url === 'string') return nested.video_url;
+    if (typeof nested.url === 'string') return nested.url;
+  }
+  return null;
+}
+
+async function callVideoApi(opts: {
+  apiUrl: string;
+  apiKey: string;
+  model: string;
+  prompt: string;
+  orientation: string;
+  duration: number;
+  imageUrls?: string[];
+  videoUrls?: string[];
+  audioUrls?: string[];
+  startImageUrl?: string;
+  endImageUrl?: string;
+  sdSize?: string;
+  onProgress?: (pct: string) => void;
+  onKeepalive?: () => void;
+  shouldCancel?: () => boolean;
+}): Promise<{ videoUrl: string | null; error: string | null; progress: string | null }> {
+  const videoBase = deriveVideoBaseUrl(opts.apiUrl);
+  const createUrl = `${videoBase}/video/create`;
+
+  const payload: any = {
+    model: opts.model,
+    prompt: opts.prompt,
+    orientation: opts.orientation,
+    duration: opts.duration,
+    watermark: false,
+  };
+  if (opts.model === 'sora-2') {
+    payload.size = '1080p';
+  } else if (opts.sdSize) {
+    payload.size = opts.sdSize;
+  }
+  if (opts.imageUrls?.length) payload.images = opts.imageUrls;
+  if (opts.videoUrls?.length) payload.videos = opts.videoUrls;
+  if (opts.audioUrls?.length) payload.audios = opts.audioUrls;
+  if (opts.startImageUrl) payload.start_image_url = opts.startImageUrl;
+  if (opts.endImageUrl) payload.end_image_url = opts.endImageUrl;
+
+  process.stderr.write(`[callVideoApi] POST ${createUrl} model=${opts.model} duration=${opts.duration}\n`);
+
+  let createResp: { status: number; body: string };
+  try {
+    createResp = await postJson(createUrl, opts.apiKey, payload, 120000);
+  } catch (e: any) {
+    return { videoUrl: null, error: `视频请求失败: ${e?.message || e}`, progress: null };
+  }
+
+  if (createResp.status < 200 || createResp.status >= 300) {
+    return {
+      videoUrl: null,
+      error: `HTTP ${createResp.status}: ${createResp.body.slice(0, 300)}`,
+      progress: null,
+    };
+  }
+
+  let createData: any;
+  try {
+    createData = JSON.parse(createResp.body);
+  } catch {
+    return { videoUrl: null, error: `解析响应失败: ${createResp.body.slice(0, 300)}`, progress: null };
+  }
+
+  if (createData.error) {
+    const msg = typeof createData.error === 'string' ? createData.error : JSON.stringify(createData.error);
+    return { videoUrl: null, error: `API错误: ${msg}`, progress: null };
+  }
+
+  const taskId = createData.id || createData.task_id || '';
+  if (!taskId) {
+    return { videoUrl: null, error: '未获取到任务ID', progress: null };
+  }
+
+  const queryUrl = `${videoBase}/video/query?id=${encodeURIComponent(taskId)}`;
+  process.stderr.write(`[callVideoApi] polling task ${taskId}\n`);
+
+  for (let i = 0; i < 180; i++) {
+    if (opts.shouldCancel?.()) {
+      return { videoUrl: null, error: '任务已取消', progress: null };
+    }
+    await new Promise(r => setTimeout(r, 5000));
+    opts.onKeepalive?.();
+
+    let pollResp: { status: number; body: string };
+    try {
+      pollResp = await getJson(queryUrl, opts.apiKey, 30000);
+    } catch {
+      continue;
+    }
+    if (pollResp.status < 200 || pollResp.status >= 300) continue;
+
+    let query: any;
+    try {
+      query = JSON.parse(pollResp.body);
+    } catch {
+      continue;
+    }
+
+    const st = String(query.status || '');
+    if (st === 'completed' || st === 'success' || st === 'SUCCESS') {
+      const videoUrl = extractVideoUrlFromQuery(query);
+      if (videoUrl) {
+        opts.onProgress?.('100');
+        return { videoUrl, error: null, progress: '100%' };
+      }
+    }
+    if (st === 'failed' || st === 'error' || st === 'ERROR' || st === 'FAILED') {
+      const errMsg = typeof query.error === 'string'
+        ? query.error
+        : (query.error ? JSON.stringify(query.error) : '视频生成失败');
+      return { videoUrl: null, error: errMsg, progress: null };
+    }
+
+    const pct = query.progress != null
+      ? (typeof query.progress === 'number' ? String(query.progress) : String(query.progress))
+      : '';
+    if (pct) {
+      opts.onProgress?.(pct);
+      process.stderr.write(`[callVideoApi] progress: ${pct}%\n`);
+    }
+  }
+
+  return { videoUrl: null, error: '视频生成超时（15分钟），请稍后重试', progress: null };
+}
+
+async function saveVideoToLocal(
+  videoUrl: string,
+  sessionId: string,
+  entryId: string,
+  outputDir?: string,
+): Promise<string> {
+  const sessionVideoDir = path.join(mcpSessionDir(sessionId), 'videos');
+  fs.mkdirSync(sessionVideoDir, { recursive: true });
+  const fname = `${entryId}.mp4`;
+  const sessionPath = path.join(sessionVideoDir, fname);
+
+  const buf = await downloadHttpToBuffer(videoUrl);
+  if (buf.length < 64) throw new Error(`Video data too small (${buf.length} bytes)`);
+  fs.writeFileSync(sessionPath, buf);
+
+  if (outputDir && outputDir.trim()) {
+    try {
+      fs.mkdirSync(outputDir, { recursive: true });
+      const outPath = path.join(outputDir, fname);
+      if (path.resolve(outPath) !== path.resolve(sessionPath)) {
+        fs.copyFileSync(sessionPath, outPath);
+      }
+    } catch (e: any) {
+      process.stderr.write(`[saveVideoToLocal] output_dir copy failed: ${e.message}\n`);
+    }
+  }
+
+  process.stderr.write(`[saveVideoToLocal] Saved ${buf.length} bytes → ${sessionPath}\n`);
+  return sessionPath;
+}
+
+function updateSessionAssistantEntry(sessionId: string, assistantId: string, finalEntry: ConvEntry) {
+  const conv = getOrCreateSession(sessionId);
+  const idx = conv.entries.findIndex(e => e.id === assistantId);
+  if (idx >= 0) {
+    conv.entries[idx] = finalEntry;
+  } else {
+    conv.entries.push(finalEntry);
+  }
+  conv.updatedAt = nowMs();
+  saveSession(conv);
+}
+
+async function runVideoJob(
+  jobId: string,
+  apiOpts: Parameters<typeof callVideoApi>[0],
+  sessionId: string,
+  assistantId: string,
+  model: string,
+  orientation: string,
+  videoSeconds: number,
+  outputDir: string,
+  sendNotification?: SendNotification,
+): Promise<void> {
+  const job = activeJobs.get(jobId)!;
+  const startTime = job.startTime;
+
+  const kaTimer = setInterval(() => {
+    const elapsed = Math.round((nowMs() - startTime) / 1000);
+    sendNotification?.('notifications/message', {
+      level: 'info', logger: 'image-gen',
+      data: `[keepalive][${jobId}] Video generation in progress... (${elapsed}s)${job.progress ? ` progress=${job.progress}` : ''}`,
+    });
+  }, 5000);
+
+  try {
+    const result = await callVideoApi({
+      ...apiOpts,
+      onProgress: (pct) => {
+        job.progress = `${pct}%`;
+        const conv = getOrCreateSession(sessionId);
+        const idx = conv.entries.findIndex(e => e.id === assistantId);
+        if (idx >= 0) {
+          conv.entries[idx] = { ...conv.entries[idx], progress: job.progress, loading: true };
+          conv.updatedAt = nowMs();
+          saveSession(conv);
+        }
+        sendNotification?.('notifications/message', {
+          level: 'info', logger: 'image-gen',
+          data: `[${jobId}] Video progress: ${pct}%`,
+        });
+      },
+      shouldCancel: () => job.cancelled,
+    });
+
+    const endTime = nowMs();
+    if (job.cancelled) {
+      job.status = 'cancelled';
+      job.endTime = endTime;
+      updateSessionAssistantEntry(sessionId, assistantId, {
+        id: assistantId,
+        type: 'assistant',
+        loading: false,
+        kind: 'video',
+        error: '任务已取消',
+        timestamp: nowMs(),
+        model,
+        orientation,
+        size: `${videoSeconds}s`,
+        duration: endTime - startTime,
+        completedAt: endTime,
+      });
+      return;
+    }
+
+    if (result.error || !result.videoUrl) {
+      job.status = 'failed';
+      job.errors = 1;
+      job.completed = 1;
+      job.endTime = endTime;
+      updateSessionAssistantEntry(sessionId, assistantId, {
+        id: assistantId,
+        type: 'assistant',
+        loading: false,
+        kind: 'video',
+        error: result.error || '未获取到视频结果',
+        timestamp: nowMs(),
+        model,
+        orientation,
+        size: `${videoSeconds}s`,
+        duration: endTime - startTime,
+        completedAt: endTime,
+      });
+      return;
+    }
+
+    let savedPath = result.videoUrl;
+    try {
+      savedPath = await saveVideoToLocal(result.videoUrl, sessionId, assistantId, outputDir || undefined);
+    } catch (e: any) {
+      process.stderr.write(`[runVideoJob] save failed, keeping remote URL: ${e?.message || e}\n`);
+    }
+
+    job.status = 'completed';
+    job.completed = 1;
+    job.videoUrl = savedPath;
+    job.progress = '100%';
+    job.endTime = endTime;
+    updateSessionAssistantEntry(sessionId, assistantId, {
+      id: assistantId,
+      type: 'assistant',
+      loading: false,
+      kind: 'video',
+      videoUrl: savedPath,
+      progress: '100%',
+      timestamp: nowMs(),
+      model,
+      orientation,
+      size: `${videoSeconds}s`,
+      duration: endTime - startTime,
+      completedAt: endTime,
+    });
+
+    sendNotification?.('notifications/message', {
+      level: 'info', logger: 'image-gen',
+      data: `[${jobId}] Video done: ${savedPath} (${((endTime - startTime) / 1000).toFixed(1)}s)`,
+    });
+  } catch (e: any) {
+    job.status = 'failed';
+    job.errors = 1;
+    job.completed = 1;
+    job.endTime = nowMs();
+    updateSessionAssistantEntry(sessionId, assistantId, {
+      id: assistantId,
+      type: 'assistant',
+      loading: false,
+      kind: 'video',
+      error: e?.message || String(e),
+      timestamp: nowMs(),
+      model,
+      orientation,
+      size: `${videoSeconds}s`,
+      duration: nowMs() - startTime,
+      completedAt: nowMs(),
+    });
+  } finally {
+    clearInterval(kaTimer);
+  }
+}
+
+async function handleGenerateVideo(args: any, progressToken?: string | number, sendNotification?: SendNotification): Promise<any> {
+  const cfg = loadProviderConfig(args.provider_id);
+  if (!cfg.apiKey) {
+    return { content: [{ type: 'text', text: 'Error: No API key configured. Please configure the MCP provider in the AI Image Generator app.' }] };
+  }
+
+  const prompt = args.prompt || '';
+  if (!prompt.trim()) {
+    return { content: [{ type: 'text', text: 'Error: prompt is required.' }] };
+  }
+
+  const model = args.model || 'sora-2';
+  const orientation = args.orientation || 'landscape';
+  const videoSeconds = Math.max(1, Number(args.duration) || 8);
+  const outputDir = args.output_dir || currentOutputDir || cfg.outputDir;
+  const nameOrId = args.session_id || '';
+  const sdSize = args.sd_size || args.size || undefined;
+  // Video generation is slow; default to background unless explicitly false
+  const isBackground = args.background !== false && args.background !== 'false';
+
+  let imageUrls: string[] | undefined;
+  const rawImages = args.reference_images || args.image_urls || undefined;
+  if (rawImages?.length) {
+    try {
+      imageUrls = await prepareReferenceImages(rawImages);
+    } catch (e: any) {
+      return { content: [{ type: 'text', text: `Error preparing reference images: ${e.message}` }] };
+    }
+  }
+
+  const videoUrls = (args.reference_videos || args.video_urls || []).filter((u: string) => !!u?.trim());
+  const audioUrls = (args.reference_audios || args.audio_urls || []).filter((u: string) => !!u?.trim());
+  const startRaw = args.start_image_url || undefined;
+  const endRaw = args.end_image_url || undefined;
+  let startImageUrl: string | undefined;
+  let endImageUrl: string | undefined;
+  if (startRaw) {
+    try {
+      startImageUrl = (await prepareReferenceImages([startRaw]))[0];
+    } catch (e: any) {
+      return { content: [{ type: 'text', text: `Error preparing start_image_url: ${e.message}` }] };
+    }
+  }
+  if (endRaw) {
+    try {
+      endImageUrl = (await prepareReferenceImages([endRaw]))[0];
+    } catch (e: any) {
+      return { content: [{ type: 'text', text: `Error preparing end_image_url: ${e.message}` }] };
+    }
+  }
+
+  const userEntryId = genId();
+  const preSession = getOrCreateSession(nameOrId);
+  const sessionId = preSession.id;
+
+  const userEntry: ConvEntry = {
+    id: userEntryId,
+    type: 'user',
+    prompt,
+    timestamp: nowMs(),
+    model,
+    orientation,
+    size: `${videoSeconds}s`,
+    kind: 'video',
+    refImages: imageUrls,
+  };
+
+  const assistantId = genId();
+  const loadingEntry: ConvEntry = {
+    id: assistantId,
+    type: 'assistant',
+    loading: true,
+    kind: 'video',
+    progress: '提交中...',
+    timestamp: nowMs(),
+    model,
+    orientation,
+    size: `${videoSeconds}s`,
+  };
+
+  appendEntriesToSession(nameOrId, [userEntry, loadingEntry]);
+
+  const apiOpts = {
+    apiUrl: cfg.apiUrl,
+    apiKey: cfg.apiKey,
+    model,
+    prompt,
+    orientation,
+    duration: videoSeconds,
+    imageUrls,
+    videoUrls: videoUrls.length ? videoUrls : undefined,
+    audioUrls: audioUrls.length ? audioUrls : undefined,
+    startImageUrl,
+    endImageUrl,
+    sdSize,
+  };
+
+  if (isBackground) {
+    const jobId = `vjob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    activeJobs.set(jobId, {
+      jobId,
+      kind: 'video',
+      status: 'running',
+      total: 1,
+      completed: 0,
+      errors: 0,
+      startTime: nowMs(),
+      sessionId,
+      entryId: assistantId,
+      images: [],
+      progress: '提交中...',
+      cancelled: false,
+    });
+    runVideoJob(jobId, apiOpts, sessionId, assistantId, model, orientation, videoSeconds, outputDir, sendNotification).catch(() => {});
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `Video generation started in background.`,
+          `Job ID: ${jobId}`,
+          `Session ID: ${sessionId}`,
+          `Model: ${model}, orientation: ${orientation}, duration: ${videoSeconds}s`,
+          `Poll with get_job_status(job_id="${jobId}") every 10-15 seconds until status is completed/failed/cancelled.`,
+        ].join('\n'),
+      }],
+    };
+  }
+
+  // Synchronous path (may take several minutes)
+  const startTime = nowMs();
+  if (progressToken != null && sendNotification) {
+    sendNotification('notifications/progress', { progressToken, progress: 0, total: 100, message: 'Starting video generation...' });
+  }
+
+  const kaTimer = setInterval(() => {
+    const elapsed = Math.round((nowMs() - startTime) / 1000);
+    sendNotification?.('notifications/message', {
+      level: 'info', logger: 'image-gen',
+      data: `[keepalive] Still generating video... (${elapsed}s elapsed)`,
+    });
+  }, 5000);
+
+  try {
+    const result = await callVideoApi({
+      ...apiOpts,
+      onProgress: (pct) => {
+        updateSessionAssistantEntry(sessionId, assistantId, {
+          ...loadingEntry,
+          progress: `${pct}%`,
+          loading: true,
+        });
+        if (progressToken != null && sendNotification) {
+          const n = parseInt(pct, 10);
+          if (!Number.isNaN(n)) {
+            sendNotification('notifications/progress', { progressToken, progress: n, total: 100, message: `Video progress ${pct}%` });
+          }
+        }
+      },
+      onKeepalive: () => {
+        const elapsed = Math.round((nowMs() - startTime) / 1000);
+        sendNotification?.('notifications/message', {
+          level: 'info', logger: 'image-gen',
+          data: `[keepalive] Waiting for video API... (${elapsed}s)`,
+        });
+      },
+    });
+
+    const endTime = nowMs();
+    if (result.error || !result.videoUrl) {
+      updateSessionAssistantEntry(sessionId, assistantId, {
+        id: assistantId,
+        type: 'assistant',
+        loading: false,
+        kind: 'video',
+        error: result.error || '未获取到视频结果',
+        timestamp: nowMs(),
+        model,
+        orientation,
+        size: `${videoSeconds}s`,
+        duration: endTime - startTime,
+        completedAt: endTime,
+      });
+      return { content: [{ type: 'text', text: `Video generation failed: ${result.error || '未知错误'}` }] };
+    }
+
+    let savedPath = result.videoUrl;
+    try {
+      savedPath = await saveVideoToLocal(result.videoUrl, sessionId, assistantId, outputDir || undefined);
+    } catch (e: any) {
+      process.stderr.write(`[handleGenerateVideo] save failed, keeping remote URL: ${e?.message || e}\n`);
+    }
+
+    updateSessionAssistantEntry(sessionId, assistantId, {
+      id: assistantId,
+      type: 'assistant',
+      loading: false,
+      kind: 'video',
+      videoUrl: savedPath,
+      progress: '100%',
+      timestamp: nowMs(),
+      model,
+      orientation,
+      size: `${videoSeconds}s`,
+      duration: endTime - startTime,
+      completedAt: endTime,
+    });
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `Video generated successfully.`,
+          `Video: ${savedPath}`,
+          `Remote URL: ${result.videoUrl}`,
+          `Session: ${sessionId}`,
+          `Duration: ${((endTime - startTime) / 1000).toFixed(1)}s`,
+          outputDir ? `Also copied to output_dir: ${outputDir}` : '',
+        ].filter(Boolean).join('\n'),
+      }],
+    };
+  } finally {
+    clearInterval(kaTimer);
+  }
 }
 
 export const TOOLS = [
@@ -1602,6 +2283,30 @@ export const TOOLS = [
         session_id: { type: 'string', description: 'Session identifier' },
         provider_id: { type: 'string', description: 'Provider ID' },
         background: { type: 'boolean', description: 'If true, start generation in background and return immediately with a jobId. Use get_job_status to poll.' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'generate_video',
+    description: 'Generate a video from a text prompt (and optional reference media). Models: sora-2, sd-2, sd-2-vip, Kling Omni. Defaults to background:true because generation often takes minutes — poll with get_job_status. Set background:false to wait synchronously.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Text prompt describing the video' },
+        model: { type: 'string', description: 'Video model: sora-2 | sd-2 | sd-2-vip | Kling Omni (default: sora-2)' },
+        orientation: { type: 'string', description: 'landscape | portrait | square (square only for Kling Omni)' },
+        duration: { type: 'number', description: 'Video length in seconds. sora-2: 4/8/12; sd-2: 4-15; Kling Omni: 3/5/8/10/12/15' },
+        reference_images: { type: 'array', items: { type: 'string' }, description: 'Reference image paths/URLs/base64. Max depends on model (sora-2:1, sd-2:9, Kling:7)' },
+        reference_videos: { type: 'array', items: { type: 'string' }, description: 'Reference video URLs (sd-2 / Kling Omni)' },
+        reference_audios: { type: 'array', items: { type: 'string' }, description: 'Reference audio URLs (sd-2, max 3)' },
+        start_image_url: { type: 'string', description: 'Start frame image URL/path (Kling Omni)' },
+        end_image_url: { type: 'string', description: 'End frame image URL/path (Kling Omni)' },
+        sd_size: { type: 'string', description: 'Quality for sd-2/Kling: large | small' },
+        output_dir: { type: 'string', description: 'Extra directory to copy the video to' },
+        session_id: { type: 'string', description: 'Session identifier for grouping' },
+        provider_id: { type: 'string', description: 'Provider ID' },
+        background: { type: 'boolean', description: 'Default true. If true, return jobId immediately and poll with get_job_status.' },
       },
       required: ['prompt'],
     },
@@ -1648,23 +2353,23 @@ export const TOOLS = [
   },
   {
     name: 'list_jobs',
-    description: 'List all active and recent background image generation jobs.',
+    description: 'List all active and recent background image/video generation jobs.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'get_job_status',
-    description: 'Get the status of a specific background job. Returns progress, elapsed time, and image paths if completed. Poll every 5-10 seconds until status is completed/cancelled.',
+    description: 'Get the status of a specific background job (image or video). Returns progress, elapsed time, and result paths if completed. Poll every 5-15 seconds until status is completed/failed/cancelled.',
     inputSchema: {
       type: 'object',
       properties: {
-        job_id: { type: 'string', description: 'The job ID returned by generate_images_parallel with background:true' },
+        job_id: { type: 'string', description: 'The job ID returned by generate_images_parallel or generate_video with background:true' },
       },
       required: ['job_id'],
     },
   },
   {
     name: 'cancel_job',
-    description: 'Cancel a running background image generation job.',
+    description: 'Cancel a running background image or video generation job.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1689,7 +2394,7 @@ export async function handleJsonRpc(msg: any, sendNotification?: SendNotificatio
         capabilities: { tools: {} },
         serverInfo: {
           name: 'image-gen-mcp',
-          version: '1.1.0',
+          version: '1.2.0',
         },
       },
     };
@@ -1716,6 +2421,9 @@ export async function handleJsonRpc(msg: any, sendNotification?: SendNotificatio
           break;
         case 'generate_images_parallel':
           result = await handleParallelGenerate(args, progressToken, sendNotification);
+          break;
+        case 'generate_video':
+          result = await handleGenerateVideo(args, progressToken, sendNotification);
           break;
         case 'set_style':
           result = handleSetStyle(args);

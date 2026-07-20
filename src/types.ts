@@ -11,6 +11,11 @@ export interface ConvEntry {
   prompt?: string;
   images?: string[];
   refImages?: string[];
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  progress?: string;
+  orientation?: string;
+  kind?: 'image' | 'video';
   error?: string;
   loading?: boolean;
   timestamp: number;

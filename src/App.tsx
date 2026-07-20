@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import type { ConvEntry, Conversation, TrashItem, BatchTask, McpConversation, ExtractConversation, ExtractTask, VideoConversation, PsdConversation } from './types';
 import { PRESET_CATEGORIES, QUICK_TEMPLATES } from './promptPresets';
 import { EXTRACT_TOOLS, EXTRACT_CATEGORIES, getToolById } from './extractTools';
@@ -81,6 +81,18 @@ function formatDuration(ms: number): string {
   const m = Math.floor(s / 60);
   const rem = Math.floor(s % 60);
   return `${m}m ${rem}s`;
+}
+
+function resolveMediaSrc(src: string): string {
+  if (!src) return src;
+  if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:') || src.startsWith('asset:') || src.startsWith('blob:')) {
+    return src;
+  }
+  try {
+    return convertFileSrc(src);
+  } catch {
+    return src;
+  }
 }
 
 function buildContext(entries: ConvEntry[], currentUserRefImageCount = 0, autoCtx = true) {
@@ -1774,19 +1786,21 @@ ${analysisText}`;
   const handleCopyImage = async (imageUrl: string) => {
     setContextMenu(null);
     try {
+      let dataUrl = '';
       if (imageUrl.startsWith('data:')) {
-        const resp = await fetch(imageUrl);
-        const blob = await resp.blob();
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      } else if (imageUrl.startsWith('http')) {
-        await navigator.clipboard.writeText(imageUrl);
+        dataUrl = imageUrl;
+      } else if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+        dataUrl = await invoke<string>('fetch_image_base64', { url: imageUrl });
       } else {
-        const b64 = await invoke<string>('read_image_base64', { path: imageUrl });
-        const resp = await fetch(b64);
-        const blob = await resp.blob();
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        dataUrl = await invoke<string>('read_image_base64', { path: imageUrl });
       }
-    } catch {}
+      const resp = await fetch(dataUrl);
+      const blob = await resp.blob();
+      const mime = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/png';
+      await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]);
+    } catch (err) {
+      console.error('[copy image] failed:', err);
+    }
   };
 
   const handleCopyImageLink = (imageUrl: string) => {
@@ -2717,7 +2731,11 @@ ${analysisText}`;
                               )}
                               {task.status === 'success' && task.image && (
                                 <>
-                                  <div className="batch-detail-img" onClick={() => setLightboxSrc(task.image!)}>
+                                  <div
+                                    className="batch-detail-img"
+                                    onClick={() => setLightboxSrc(task.image!)}
+                                    onContextMenu={e => openContextMenu(e, task.image!, activeMcpSessionId || undefined, batchEntry.id)}
+                                  >
                                     <LocalImage src={task.image} alt={`图片 #${i + 1}`} style={{ cursor: 'zoom-in' }} />
                                   </div>
                                   <div className="batch-detail-overlay-actions">
@@ -2789,7 +2807,11 @@ ${analysisText}`;
                           {entry.loading && !entry.batchTotal && (
                             <div className="loading-container">
                               <div className="loading-spinner" />
-                              <span className="loading-text">正在生成图片...</span>
+                              <span className="loading-text">
+                                {entry.kind === 'video'
+                                  ? `正在生成视频${entry.progress ? ` (${entry.progress})` : ''}...`
+                                  : '正在生成图片...'}
+                              </span>
                             </div>
                           )}
                           {(() => {
@@ -2867,6 +2889,25 @@ ${analysisText}`;
                               {entry.error}
                             </div>
                           )}
+                          {!entry.loading && entry.videoUrl && (
+                            <div className="video-result">
+                              <div className="video-player-container">
+                                <video
+                                  src={resolveMediaSrc(entry.videoUrl)}
+                                  controls
+                                  preload="metadata"
+                                  className="video-player"
+                                />
+                              </div>
+                              <div className="video-result-meta">
+                                {entry.model && <span className="video-model-badge">{entry.model}</span>}
+                                {entry.orientation && <span>{entry.orientation}</span>}
+                                {entry.size && <span>{entry.size}</span>}
+                                <a href={resolveMediaSrc(entry.videoUrl)} download className="video-download-btn" title="下载视频">下载</a>
+                                <a href={resolveMediaSrc(entry.videoUrl)} target="_blank" rel="noreferrer" className="video-download-btn" title="新窗口打开">打开</a>
+                              </div>
+                            </div>
+                          )}
                           {!entry.loading && (!entry.batchTotal || entry.batchTotal <= 1) && entry.images && entry.images.length > 0 && (
                             <div className="image-grid">
                               {entry.images.map((img, i) => (
@@ -2904,6 +2945,9 @@ ${analysisText}`;
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
                                   {entry.imageCount} 张
                                 </span>
+                              )}
+                              {entry.kind === 'video' && (
+                                <span className="summary-item">视频</span>
                               )}
                               {entry.batchTotal != null && entry.batchTotal > 1 && (
                                 <span className="summary-item batch-summary">
@@ -4509,7 +4553,7 @@ ${analysisText}`;
                 <div className="setting-item mcp-settings-section">
                   <label>MCP 服务器配置</label>
                   <div className="mcp-settings-description">
-                    外部 AI 工具通过 MCP 协议调用本工具生成图片。配置用于 MCP 调用的 Provider 和默认参数。
+                    外部 AI 工具通过 MCP 协议调用本工具生成图片与视频。配置用于 MCP 调用的 Provider 和默认参数。
                   </div>
                   <div className="mcp-setting-row">
                     <label className="mcp-sub-label">MCP Provider</label>
@@ -4775,6 +4819,11 @@ ${analysisText}`;
             code: `使用 image-gen MCP 并行生成 4 张不同风格的日落风景图，尺寸 1280x720`,
           },
           {
+            title: '生成视频',
+            desc: '调用 MCP 生成视频（默认后台任务）。可用 get_job_status 轮询进度。',
+            code: `使用 image-gen MCP 生成一段 8 秒横屏视频：一只猫咪在赛博朋克街道上行走，模型 sora-2`,
+          },
+          {
             title: '设置风格前缀',
             desc: '在后续所有生图调用中自动加上风格前缀，保持一致风格。',
             code: `使用 image-gen MCP 设置风格为：电影级光影、8K 超清、写实风格`,
@@ -4845,7 +4894,7 @@ ${analysisText}`;
               <div className="mcp-guide-body">
                 <section className="mcp-guide-section">
                   <h4>什么是 MCP？</h4>
-                  <p>MCP（Model Context Protocol）是一种让 AI 工具（如 Claude Desktop、Cursor、VS Code Copilot 等）调用外部能力的标准协议。配置好本工具的 MCP 服务后，你可以在这些 AI 工具中直接通过自然语言指令调用本 app 生成图片，所有生图记录会自动归档到本 app 的 MCP 会话列表中。</p>
+                  <p>MCP（Model Context Protocol）是一种让 AI 工具（如 Claude Desktop、Cursor、VS Code Copilot 等）调用外部能力的标准协议。配置好本工具的 MCP 服务后，你可以在这些 AI 工具中直接通过自然语言指令调用本 app 生成图片或视频，所有记录会自动归档到本 app 的 MCP 会话列表中。</p>
                 </section>
 
                 <section className="mcp-guide-section">
@@ -4959,11 +5008,15 @@ ${analysisText}`;
                     </div>
                     {[
                       { name: 'generate_image', desc: '生成单张图片', params: 'prompt, size?, style?, model?, reference_images?, output_dir?, session_id?' },
-                      { name: 'generate_images_parallel', desc: '并行生成多张', params: 'prompt, count, size?, style?, reference_images?, session_id?' },
+                      { name: 'generate_images_parallel', desc: '并行生成多张', params: 'prompt, count, size?, style?, reference_images?, session_id?, background?' },
+                      { name: 'generate_video', desc: '生成视频（默认后台）', params: 'prompt, model?, orientation?, duration?, reference_images?, reference_videos?, sd_size?, background?, session_id?' },
                       { name: 'set_style', desc: '设置全局风格前缀', params: 'style' },
                       { name: 'set_output_dir', desc: '设置输出目录', params: 'output_dir' },
                       { name: 'set_config', desc: '更新运行时配置', params: 'model?, size?, style?, output_dir?' },
                       { name: 'get_status', desc: '查看当前状态', params: '无' },
+                      { name: 'list_jobs', desc: '列出后台任务', params: '无' },
+                      { name: 'get_job_status', desc: '查询后台任务进度', params: 'job_id' },
+                      { name: 'cancel_job', desc: '取消后台任务', params: 'job_id' },
                     ].map(t => (
                       <div key={t.name} className="mcp-tools-row">
                         <span className="mcp-col-name"><code>{t.name}</code></span>
@@ -4977,9 +5030,10 @@ ${analysisText}`;
                 <section className="mcp-guide-section">
                   <h4>提示</h4>
                   <ul className="mcp-guide-list">
-                    <li>每次调用 MCP 生图后，本 app 内的 MCP 标签页会自动出现对应会话</li>
+                    <li>每次调用 MCP 生图/生视频后，本 app 内的 MCP 标签页会自动出现对应会话</li>
                     <li>使用 session_id 参数传入会话"标题"（即 MCP 标签页中看到的名称）可聚合多次调用到同一会话；相同标题 = 同一会话</li>
-                    <li>输出目录留空时使用默认路径：mcp_conversations/&lt;session&gt;/images/</li>
+                    <li>图片默认路径：mcp_conversations/&lt;session&gt;/images/；视频：mcp_conversations/&lt;session&gt;/videos/</li>
+                    <li>视频生成默认走后台任务（background:true），用 get_job_status 轮询；设 background:false 可同步等待</li>
                     <li>风格前缀是运行时临时状态，重启 MCP 服务后会重置</li>
                   </ul>
                 </section>
